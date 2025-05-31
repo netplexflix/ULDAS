@@ -1,0 +1,10 @@
+openai-whisper>=20240930
+PyYAML>=6.0.2
+numba>=0.61.2
+requests>=2.23.3
+packaging>=21.3
+torch>=2.7.0
+
+# Note: External tools required (install separately):
+# - FFmpeg: https://ffmpeg.org/download.html
+# - MKVToolNix: https://mkvtoolnix.download/downloads.html
