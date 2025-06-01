@@ -15,7 +15,7 @@ import time
 import requests
 from packaging import version
 
-VERSION = '1.0'
+VERSION = '1.1'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -308,7 +308,7 @@ class MKVLanguageDetector:
         }
         
         # Video file extensions to consider for remuxing
-        self.video_extensions = {'.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
+        self.video_extensions = {'.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.m2ts', '.mts', '.ts', '.vob'}
     
     def find_video_files(self, directory: str) -> List[Path]:
         directory_path = Path(directory)
