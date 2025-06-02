@@ -17,7 +17,7 @@ from packaging import version
 import psutil
 import threading
 
-VERSION = '1.2'
+VERSION = '1.3'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -334,7 +334,8 @@ class MKVLanguageDetector:
             'farsi': 'per',
             'filipino': 'tgl',
             'bahasa indonesia': 'ind',
-            'bahasa malaysia': 'may'
+            'bahasa malaysia': 'may',
+            'no linguistic content': 'zxx'
         }
         
         # Video file extensions to consider for remuxing
@@ -789,32 +790,49 @@ class MKVLanguageDetector:
     
     def detect_language(self, audio_path: Path) -> Optional[str]:
         try:
-            # Check if audio file is valid
             if not audio_path.exists() or audio_path.stat().st_size < 1000:
                 logger.error(f"Audio file is too small or doesn't exist: {audio_path}")
                 return None
             
-            # Load and transcribe audio with language detection options
             if self.config.show_details:
                 logger.info(f"Analyzing audio file: {audio_path} ({audio_path.stat().st_size} bytes)")
             
-            result = self.whisper_model.transcribe(
-                str(audio_path),
-                language=None,  # Let Whisper auto-detect
-                task="transcribe",
-                temperature=0.0,
-                best_of=3,
-                beam_size=5,
-                patience=1.0,
-                length_penalty=1.0,
-                suppress_tokens="-1",
-                initial_prompt=None,
-                condition_on_previous_text=True,
-                fp16=False,
-                compression_ratio_threshold=2.4,
-                logprob_threshold=-1.0,
-                no_speech_threshold=0.6
-            )
+            transcribe_options = {
+                "language": None,  # Let Whisper auto-detect
+                "task": "transcribe",
+                "temperature": 0.0,
+                "best_of": 3,
+                "beam_size": 5,
+                "patience": 1.0,
+                "length_penalty": 1.0,
+                "suppress_tokens": "-1",
+                "initial_prompt": None,
+                "condition_on_previous_text": True,
+                "fp16": False,
+                "compression_ratio_threshold": 2.4,
+                "logprob_threshold": -1.0,
+                "no_speech_threshold": 0.6
+            }
+            
+            # Try to add VAD filter options if supported by the Whisper version
+            try:
+                # Test if VAD filter is supported by trying to create DecodingOptions with it
+                import whisper.decoding
+                test_options = whisper.decoding.DecodingOptions(
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500)
+                )
+                # If no exception, VAD is supported
+                transcribe_options["vad_filter"] = True
+                transcribe_options["vad_parameters"] = dict(min_silence_duration_ms=500)
+                if self.config.show_details:
+                    logger.info("Using VAD filter for voice activity detection")
+            except (TypeError, AttributeError):
+                # VAD filter not supported in this Whisper version
+                if self.config.show_details:
+                    logger.info("VAD filter not available in this Whisper version, using standard detection")
+            
+            result = self.whisper_model.transcribe(str(audio_path), **transcribe_options)
             
             detected_language = result['language']
             segments = result.get('segments', [])
@@ -840,7 +858,31 @@ class MKVLanguageDetector:
             text_length = len(text_sample)
             word_count = len(text_sample.split()) if text_sample else 0
             
-            min_confidence = 0.2 if text_length > 20 else 0.1
+            # Enhanced silent content detection
+            # Check if segments have high no_speech_prob (indicating silence/music)
+            segments_with_speech = []
+            if segments:
+                segments_with_speech = [s for s in segments if s.get('no_speech_prob', 1.0) < 0.5]
+            
+            is_silent = (
+                # Original silence detection
+                ((detected_language.lower() == 'english' or detected_language.lower() == 'en') and
+                 confidence < 0.1 and text_length == 0 and word_count == 0) or
+                # Segment-based silence detection (works with or without VAD)
+                (len(segments) > 0 and len(segments_with_speech) == 0 and text_length < 10) or
+                # General low-content detection
+                (confidence < 0.05 and text_length < 5) or
+                # Hallucination detection - repetitive or nonsensical characters
+                (text_length > 0 and self._is_likely_hallucination(text_sample))
+            )
+            
+            if is_silent:
+                if self.config.show_details:
+                    logger.info("No speech detected or likely hallucination - marking as 'no linguistic content' (zxx)")
+                return 'zxx'
+            
+            # Adjust confidence thresholds based on text quality
+            min_confidence = 0.25 if text_length > 20 else 0.15
             
             if (confidence > min_confidence and text_length > 5 and word_count > 1) or confidence > 0.5:
                 iso_code = self.language_codes.get(detected_language.lower(), detected_language)
@@ -860,9 +902,61 @@ class MKVLanguageDetector:
             logger.error(f"Error detecting language for {audio_path}: {e}")
             return None
         finally:
-            # Clean up temporary file
             if audio_path.exists():
                 audio_path.unlink()
+
+    def _is_likely_hallucination(self, text: str) -> bool:
+        """
+        Detect if the transcribed text is likely a hallucination from silent audio.
+        
+        Args:
+            text: The transcribed text to analyze
+            
+        Returns:
+            True if the text appears to be hallucinated, False otherwise
+        """
+        if not text or len(text.strip()) == 0:
+            return True
+        
+        text = text.strip()
+        
+        # Check for repetitive single characters or very short sequences
+        if len(set(text.replace(' ', ''))) <= 3 and len(text) > 10:
+            return True
+        
+        # Check for non-Latin scripts that might indicate hallucination
+        # (especially common with silent audio)
+        non_latin_count = 0
+        for char in text:
+            if ord(char) > 127:  # Non-ASCII
+                # Check if it's from scripts commonly hallucinated on silent audio
+                if (0x1780 <= ord(char) <= 0x17FF or  # Khmer
+                    0x0E00 <= ord(char) <= 0x0E7F or  # Thai
+                    0x1000 <= ord(char) <= 0x109F or  # Myanmar
+                    0x0980 <= ord(char) <= 0x09FF):   # Bengali
+                    non_latin_count += 1
+        
+        # If more than 50% of characters are from potentially hallucinated scripts
+        if len(text) > 0 and (non_latin_count / len(text)) > 0.5:
+            return True
+        
+        # Check for very repetitive patterns
+        words = text.split()
+        if len(words) > 3:
+            unique_words = set(words)
+            if len(unique_words) / len(words) < 0.3:  # Less than 30% unique words
+                return True
+        
+        # Check for sequences of identical short strings
+        if len(text) > 20:
+            # Look for patterns like "្្ ្្ ្្" or similar
+            parts = text.split()
+            if len(parts) > 5:
+                unique_parts = set(parts)
+                if len(unique_parts) <= 2:  # Only 1-2 unique "words" repeated
+                    return True
+        
+        return False
     
     def update_mkv_language(self, file_path: Path, track_index: int, language_code: str, 
                           dry_run: bool = False) -> bool:
@@ -1040,10 +1134,17 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
     total_files = len(results)
     files_with_actions = 0
     files_processed = 0
+    silent_content_files = []
+    
+    # ANSI color codes
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    RESET = '\033[0m'
     
     for result in results:
         file_name = Path(result['original_file']).name
         actions = []
+        has_silent_content = False
         
         if result['was_remuxed']:
             actions.append("remuxed")
@@ -1056,10 +1157,14 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
         for track in processed_tracks:
             track_idx = track['track_index']
             lang_code = track['detected_language']
-            track_actions.append(f"track{track_idx}: {lang_code}")
+            if lang_code == 'zxx':
+                track_actions.append(f"{YELLOW}track{track_idx}: {lang_code} (no speech){RESET}")
+                has_silent_content = True
+            else:
+                track_actions.append(f"track{track_idx}: {lang_code}")
         
         for track_idx in failed_tracks:
-            track_actions.append(f"track{track_idx}: failed")
+            track_actions.append(f"{RED}track{track_idx}: failed{RESET}")
         
         major_errors = [e for e in result['errors'] if not any(track_phrase in e for track_phrase in 
                        ['Failed to extract audio from track', 'Failed to detect language for track', 'Failed to update track'])]
@@ -1071,8 +1176,10 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
             print(f"{file_name}: {', '.join(all_actions)}")
             files_processed += 1
             show_file = True
+            if has_silent_content:
+                silent_content_files.append(file_name)
         elif major_errors:
-            print(f"{file_name}: error - {major_errors[0]}")
+            print(f"{file_name}: {RED}error{RESET} - {major_errors[0]}")
             show_file = True
         
         if show_file:
@@ -1084,6 +1191,18 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
             print(f"Successfully processed {files_processed} files")
     else:
         print("No files required any action")
+    
+    # Special warning for silent content
+    if silent_content_files:
+        print(f"\n{YELLOW}⚠️  WARNING: Silent content detected in {len(silent_content_files)} file(s){RESET}")
+        print(f"{YELLOW}   These tracks were marked as 'zxx' (no linguistic content). You may want to manually verify them.{RESET}")
+        if len(silent_content_files) <= 5:
+            for filename in silent_content_files:
+                print(f"{YELLOW}   - {filename}{RESET}")
+        else:
+            for filename in silent_content_files[:3]:
+                print(f"{YELLOW}   - {filename}{RESET}")
+            print(f"{YELLOW}   ... and {len(silent_content_files) - 3} more{RESET}")
     
     print(f"\nTotal runtime: {format_duration(runtime_seconds)}")
     
