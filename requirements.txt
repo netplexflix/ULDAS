@@ -4,6 +4,7 @@ numba>=0.61.2
 requests>=2.23.3
 packaging>=21.3
 torch>=2.7.0
+psutil>=7.0.0
 
 # Note: External tools required (install separately):
 # - FFmpeg: https://ffmpeg.org/download.html

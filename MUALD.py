@@ -14,11 +14,40 @@ import warnings
 import time
 import requests
 from packaging import version
+import psutil
+import threading
 
-VERSION = '1.1'
+VERSION = '1.2'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def setup_cpu_limits():
+    try:
+        current_process = psutil.Process()
+        
+        if hasattr(os, 'nice'):
+            os.nice(10)  # Unix/Linux: increase nice value (lower priority)
+        elif hasattr(current_process, 'nice'):
+            current_process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)  # Windows
+        
+        # Limit to 75% of available CPU cores
+        cpu_count = psutil.cpu_count()
+        max_cores = max(1, int(cpu_count * 0.75))
+        
+        if hasattr(current_process, 'cpu_affinity'):
+            available_cores = list(range(min(max_cores, cpu_count)))
+            current_process.cpu_affinity(available_cores)
+            logger.info(f"Limited to {len(available_cores)} of {cpu_count} CPU cores")
+        
+    except Exception as e:
+        logger.warning(f"Could not set CPU limits: {e}")
+
+def limit_subprocess_resources(cmd):
+    if sys.platform == 'win32':
+        return cmd
+    else:
+        return ['nice', '-n', '10'] + cmd
 
 class Config:
     def __init__(self):
@@ -188,7 +217,8 @@ def find_mkvtoolnix_installation():
 
 class MKVLanguageDetector:
     def __init__(self, config: Config):
-
+        setup_cpu_limits()
+        
         self.config = config
         
         if not config.show_details:
@@ -360,6 +390,10 @@ class MKVLanguageDetector:
                 logger.warning(f"Could not analyze input streams: {e}")
                 streams = []
             
+            # Check for problematic M2TS characteristics
+            is_m2ts = file_path.suffix.lower() in ['.m2ts', '.mts', '.ts']
+            has_pcm_bluray = any(stream.get('codec_name') == 'pcm_bluray' for stream in streams if stream.get('codec_type') == 'audio')
+            
             map_args = []
             has_video = False
             has_audio = False
@@ -393,60 +427,114 @@ class MKVLanguageDetector:
                 if self.config.show_details:
                     logger.info("Using fallback mapping (video and audio only)")
             
-            remux_strategies = [
-                # Strategy 1: Copy all streams with selective mapping
-                {
-                    'name': 'selective_copy',
+            # Define remux strategies with M2TS-specific handling
+            remux_strategies = []
+            
+            # Strategy 1: M2TS-specific strategy with timestamp fixes and audio conversion
+            if is_m2ts:
+                remux_strategies.append({
+                    'name': 'm2ts_optimized',
                     'args': [
                         self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
-                        '-i', str(file_path),
-                        '-c', 'copy'
-                    ] + map_args + [
-                        '-avoid_negative_ts', 'make_zero',
-                        '-map_metadata', '0',
-                        str(mkv_path)
-                    ]
-                },
-                # Strategy 2: Copy with subtitle conversion
-                {
-                    'name': 'convert_subtitles',
-                    'args': [
-                        self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
+                        '-analyzeduration', '100M', '-probesize', '100M',
                         '-i', str(file_path),
                         '-map', '0:v', '-c:v', 'copy',
-                        '-map', '0:a', '-c:a', 'copy',
-                        '-map', '0:s?', '-c:s', 'srt',  # Convert subtitles to SRT
+                        '-map', '0:a', '-c:a', 'flac' if has_pcm_bluray else 'copy',
                         '-avoid_negative_ts', 'make_zero',
+                        '-fflags', '+discardcorrupt',
                         '-map_metadata', '0',
                         str(mkv_path)
                     ]
-                },
-                # Strategy 3: Video and audio only (no subtitles)
-                {
-                    'name': 'no_subtitles',
-                    'args': [
-                        self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
-                        '-i', str(file_path),
-                        '-map', '0:v', '-c:v', 'copy',
-                        '-map', '0:a', '-c:a', 'copy',
-                        '-avoid_negative_ts', 'make_zero',
-                        '-map_metadata', '0',
-                        str(mkv_path)
-                    ]
-                },
-                # Strategy 4: Force container without stream copy (slower but more compatible)
-                {
-                    'name': 'force_remux',
-                    'args': [
-                        self.ffmpeg, '-y', '-v', 'warning',
-                        '-i', str(file_path),
-                        '-map', '0:v', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-                        '-map', '0:a', '-c:a', 'copy',
-                        '-avoid_negative_ts', 'make_zero',
-                        str(mkv_path)
-                    ]
-                }
-            ]
+                })
+                
+                # Strategy 2: M2TS with PCM to AC3 conversion for better compatibility
+                if has_pcm_bluray:
+                    remux_strategies.append({
+                        'name': 'm2ts_pcm_to_ac3',
+                        'args': [
+                            self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
+                            '-analyzeduration', '100M', '-probesize', '100M',
+                            '-i', str(file_path),
+                            '-map', '0:v', '-c:v', 'copy',
+                            '-map', '0:a', '-c:a', 'ac3', '-b:a', '640k',
+                            '-avoid_negative_ts', 'make_zero',
+                            '-fflags', '+discardcorrupt',
+                            '-map_metadata', '0',
+                            str(mkv_path)
+                        ]
+                    })
+            
+            # Strategy 3: Enhanced selective copy with better error handling
+            remux_strategies.append({
+                'name': 'selective_copy_enhanced',
+                'args': [
+                    self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
+                    '-analyzeduration', '50M', '-probesize', '50M',
+                    '-i', str(file_path),
+                    '-c', 'copy'
+                ] + map_args + [
+                    '-avoid_negative_ts', 'make_zero',
+                    '-fflags', '+discardcorrupt',
+                    '-map_metadata', '0',
+                    str(mkv_path)
+                ]
+            })
+            
+            # Strategy 4: Original selective copy
+            remux_strategies.append({
+                'name': 'selective_copy',
+                'args': [
+                    self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
+                    '-i', str(file_path),
+                    '-c', 'copy'
+                ] + map_args + [
+                    '-avoid_negative_ts', 'make_zero',
+                    '-map_metadata', '0',
+                    str(mkv_path)
+                ]
+            })
+            
+            # Strategy 5: Convert subtitles
+            remux_strategies.append({
+                'name': 'convert_subtitles',
+                'args': [
+                    self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
+                    '-i', str(file_path),
+                    '-map', '0:v', '-c:v', 'copy',
+                    '-map', '0:a', '-c:a', 'copy',
+                    '-map', '0:s?', '-c:s', 'srt',  # Convert subtitles to SRT
+                    '-avoid_negative_ts', 'make_zero',
+                    '-map_metadata', '0',
+                    str(mkv_path)
+                ]
+            })
+            
+            # Strategy 6: Video and audio only (no subtitles)
+            remux_strategies.append({
+                'name': 'no_subtitles',
+                'args': [
+                    self.ffmpeg, '-y', '-v', 'warning', '-fflags', '+genpts',
+                    '-i', str(file_path),
+                    '-map', '0:v', '-c:v', 'copy',
+                    '-map', '0:a', '-c:a', 'copy',
+                    '-avoid_negative_ts', 'make_zero',
+                    '-map_metadata', '0',
+                    str(mkv_path)
+                ]
+            })
+            
+            # Strategy 7: Force container without stream copy (slower but more compatible)
+            remux_strategies.append({
+                'name': 'force_remux',
+                'args': [
+                    self.ffmpeg, '-y', '-v', 'warning',
+                    '-i', str(file_path),
+                    '-map', '0:v', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                    '-map', '0:a', '-c:a', 'copy',
+                    '-avoid_negative_ts', 'make_zero',
+                    str(mkv_path)
+                ]
+            })
             
             last_error = None
             remux_successful = False
@@ -456,7 +544,10 @@ class MKVLanguageDetector:
                     if self.config.show_details:
                         logger.info(f"Trying remux strategy: {strategy['name']}")
                     
-                    result = subprocess.run(strategy['args'], check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                    limited_cmd = limit_subprocess_resources(strategy['args'])
+                    
+                    result = subprocess.run(limited_cmd, check=True, capture_output=True, 
+                                          text=True, encoding='utf-8', errors='replace')
                     
                     # Verify the output file
                     if mkv_path.exists() and mkv_path.stat().st_size > 10000:
@@ -503,7 +594,7 @@ class MKVLanguageDetector:
                     import gc
                     gc.collect()
                     
-                    # Add 10second delay to ensure Windows releases file handles
+                    # Add 10 second delay to ensure Windows releases file handles
                     import time
                     time.sleep(10)
                     
@@ -613,17 +704,21 @@ class MKVLanguageDetector:
                             '-i', str(file_path),
                             '-t', str(segment_duration),
                             '-map', map_strategy,
-                            '-ar', '16000',        # Sample rate for Whisper
-                            '-ac', '1',            # Mono
-                            '-af', 'volume=2.0,highpass=f=80,lowpass=f=8000,dynaudnorm=f=200:g=3',  # Audio filters for better speech
+                            '-ar', '16000',
+                            '-ac', '1',
+                            '-af', 'volume=2.0,highpass=f=80,lowpass=f=8000,dynaudnorm=f=200:g=3',
                             '-f', 'wav',
                             str(temp_path)
                         ]
                         
+                        # Apply CPU limiting to subprocess
+                        limited_cmd = limit_subprocess_resources(cmd)
+                        
                         if self.config.show_details:
                             logger.debug(f"Trying segment {segment_start}s with mapping {map_strategy}")
                         
-                        result = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                        result = subprocess.run(limited_cmd, check=True, capture_output=True, 
+                                              text=True, encoding='utf-8', errors='replace')
                         
                         if temp_path.exists() and temp_path.stat().st_size > 5000:  # At least 5KB for better quality
                             try:
