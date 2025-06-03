@@ -90,7 +90,7 @@ Always Processed:
 * **MKV files:** Primary target format
 
 With `remux_to_mkv: true`
-* MP4, AVI, MOV, WMV, FLV, WebM, M4V
+* MP4, AVI, MOV, WMV, FLV, WebM, M4V, M2TS, MTS, TS, VOB
 * Note: Original files are deleted after successful conversion
 
 ---
