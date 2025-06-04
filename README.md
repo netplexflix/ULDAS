@@ -24,7 +24,7 @@ Requires
 ### 1️⃣ Download the script
 Clone the repository:
 ```sh
-git clone https://github.com/netplexflix/MMKV-Undefined-Audio-Language-Detector.git
+git clone https://github.com/netplexflix/MKV-Undefined-Audio-Language-Detector.git
 cd MKV-Undefined-Audio-Language-Detector
 ```
 
