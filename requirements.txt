@@ -1,7 +1,6 @@
-openai-whisper>=20240930
+faster-whisper>=1.2.0
 PyYAML>=6.0.2
-numba>=0.61.2
-requests>=2.23.3
+requests>=2.32.4
 packaging>=21.3
 torch>=2.7.0
 psutil>=7.0.0

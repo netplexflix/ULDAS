@@ -1,0 +1,7 @@
+path:
+  - P:/Movies
+  - P:/TV
+remux_to_mkv: true
+show_details: false
+whisper_model: small
+dry_run: false
