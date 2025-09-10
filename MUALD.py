@@ -17,7 +17,7 @@ import requests
 from packaging import version
 import psutil
 
-VERSION = '2.0'
+VERSION = '2.1'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -818,6 +818,15 @@ class MKVLanguageDetector:
                                 raise e
                                 
                 except Exception as e:
+                    # Store the deletion failure info for later reporting
+                    if not hasattr(self, 'deletion_failures'):
+                        self.deletion_failures = []
+                    self.deletion_failures.append({
+                        'original_file': str(file_path),
+                        'mkv_file': str(mkv_path),
+                        'error': str(e)
+                    })
+                    
                     logger.warning(f"Remux successful but failed to remove original file {file_path}: {e}")
                     if self.config.show_details:
                         logger.warning("You may need to manually delete the original file")
@@ -1856,7 +1865,7 @@ def format_duration(seconds):
     seconds = int(seconds % 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds: float):
+def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds: float, detector: MKVLanguageDetector = None):
     print(f"\n{'='*60}")
     print("PROCESSING SUMMARY")
     print(f"{'='*60}")
@@ -1886,11 +1895,11 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
         
         processed_tracks = sorted(result['processed_tracks'], key=lambda x: x['track_index'])
         failed_tracks = sorted(result.get('failed_tracks', []))
- 
+
         if failed_tracks or any(error for error in result['errors'] if not any(track_phrase in error for track_phrase in 
                                ['Failed to extract audio from track', 'Failed to detect language for track', 'Failed to update track'])):
             file_has_failures = True
-			
+            
         track_actions = []
         
         for track in processed_tracks:
@@ -1966,6 +1975,18 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
             for filename in silent_content_files[:3]:
                 print(f"{YELLOW}   - {filename}{RESET}")
             print(f"{YELLOW}   ... and {len(silent_content_files) - 3} more{RESET}")
+    
+    # Show deletion failures if any occurred
+    if detector and hasattr(detector, 'deletion_failures') and detector.deletion_failures:
+        print(f"\n{YELLOW}⚠️  WARNING: {len(detector.deletion_failures)} original file(s) could not be deleted after remuxing. (read-only?){RESET}")
+        
+        for failure in detector.deletion_failures:
+            original_name = Path(failure['original_file']).name
+            print(f"{YELLOW}   - {original_name}{RESET}")
+            if config.show_details:
+                print(f"{YELLOW}     Error: {failure['error']}{RESET}")
+                print(f"{YELLOW}     Original: {failure['original_file']}{RESET}")
+                print(f"{YELLOW}     MKV: {failure['mkv_file']}{RESET}")
     
     print(f"\nTotal runtime: {format_duration(runtime_seconds)}")
     
@@ -2158,7 +2179,7 @@ def main():
     end_time = time.time()
     runtime_seconds = end_time - start_time
     
-    print_detailed_summary(results, config, runtime_seconds)
+    print_detailed_summary(results, config, runtime_seconds, detector)
 
 if __name__ == "__main__":
     main()
