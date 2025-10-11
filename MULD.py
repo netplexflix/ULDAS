@@ -16,8 +16,9 @@ import time
 import requests
 from packaging import version
 import psutil
+import re
 
-VERSION = '2.1'
+VERSION = '2025.10.11'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -65,6 +66,13 @@ class Config:
         self.confidence_threshold = 0.9
         self.reprocess_all = False  # reprocess all audio tracks instead of only undefined ones
         
+        # Subtitle processing options
+        self.process_subtitles = False
+        self.analyze_forced_subtitles = False
+        self.detect_sdh_subtitles = True
+        self.subtitle_confidence_threshold = 0.85
+        self.reprocess_all_subtitles = False
+        
     def load_from_file(self, config_path: str = "config/config.yml"):
         config_dir = os.path.dirname(config_path)
         if config_dir and not os.path.exists(config_dir):
@@ -93,6 +101,13 @@ class Config:
                 self.confidence_threshold = config_data.get('confidence_threshold', self.confidence_threshold)
                 self.reprocess_all = config_data.get('reprocess_all', self.reprocess_all)
                 
+                # Load subtitle processing options
+                self.process_subtitles = config_data.get('process_subtitles', self.process_subtitles)
+                self.analyze_forced_subtitles = config_data.get('analyze_forced_subtitles', self.analyze_forced_subtitles)
+                self.detect_sdh_subtitles = config_data.get('detect_sdh_subtitles', self.detect_sdh_subtitles)
+                self.subtitle_confidence_threshold = config_data.get('subtitle_confidence_threshold', self.subtitle_confidence_threshold)
+                self.reprocess_all_subtitles = config_data.get('reprocess_all_subtitles', self.reprocess_all_subtitles)
+                
             logger.info(f"Configuration loaded from {config_path}")
             
         except Exception as e:
@@ -116,7 +131,12 @@ class Config:
             'compute_type': 'auto',
             'cpu_threads': 0,
             'confidence_threshold': 0.9,
-            'reprocess_all': False
+            'reprocess_all': False,
+            'process_subtitles': True,
+            'analyze_forced_subtitles': True,
+            'detect_sdh_subtitles': True,
+            'subtitle_confidence_threshold': 0.85,
+            'reprocess_all_subtitles': False
         }
         
         try:
@@ -1006,6 +1026,69 @@ class MKVLanguageDetector:
         
         return all_tracks
 
+    def find_undefined_subtitle_tracks(self, file_path: Path) -> List[Tuple[int, Dict, int]]:
+        """Find subtitle tracks with undefined language tags."""
+        info = self.get_mkv_info(file_path)
+        undefined_tracks = []
+        
+        if 'streams' not in info:
+            return undefined_tracks
+        
+        subtitle_track_count = 0
+        for i, stream in enumerate(info['streams']):
+            if stream.get('codec_type') == 'subtitle':
+                tags = stream.get('tags', {})
+                
+                language = None
+                for key in tags:
+                    if key.lower() in ['language', 'lang']:
+                        language = tags[key].lower().strip()
+                        break
+                
+                undefined_indicators = ['und', 'unknown', 'undefined', 'undetermined', '']
+                
+                if not language or language in undefined_indicators:
+                    undefined_tracks.append((subtitle_track_count, stream, i))
+                    if self.config.show_details:
+                        lang_display = language if language else 'missing'
+                        logger.info(f"Found undefined subtitle track {subtitle_track_count} (stream {i}) in {file_path.name} - language: '{lang_display}'")
+                else:
+                    if self.config.show_details:
+                        logger.info(f"Subtitle track {subtitle_track_count} (stream {i}) already has language: '{language}' - skipping")
+                
+                subtitle_track_count += 1
+        
+        return undefined_tracks
+
+    def find_all_subtitle_tracks(self, file_path: Path) -> List[Tuple[int, Dict, int, str]]:
+        """Find all subtitle tracks regardless of language status."""
+        info = self.get_mkv_info(file_path)
+        all_tracks = []
+        
+        if 'streams' not in info:
+            return all_tracks
+        
+        subtitle_track_count = 0
+        for i, stream in enumerate(info['streams']):
+            if stream.get('codec_type') == 'subtitle':
+                tags = stream.get('tags', {})
+                current_language = None
+                for key in tags:
+                    if key.lower() in ['language', 'lang']:
+                        current_language = tags[key].lower().strip()
+                        break
+                
+                current_language = self.normalize_language_code(current_language)
+                
+                all_tracks.append((subtitle_track_count, stream, i, current_language))
+                if self.config.show_details:
+                    lang_display = current_language if current_language else 'missing'
+                    logger.info(f"Found subtitle track {subtitle_track_count} (stream {i}) in {file_path.name} - current language: '{lang_display}'")
+                
+                subtitle_track_count += 1
+        
+        return all_tracks
+
     def get_file_duration(self, file_path: Path) -> float:
         try:
             cmd = [
@@ -1050,7 +1133,6 @@ class MKVLanguageDetector:
         try:
             if self.config.show_details:
                 logger.info(f"Starting transcription ({attempt_name})...")
-            else:
                 print(f"Transcribing audio ({attempt_name})...", flush=True)
             
             # Configure VAD options if enabled
@@ -1093,7 +1175,6 @@ class MKVLanguageDetector:
             
             if self.config.show_details:
                 logger.info(f"Transcription completed, processing results...")
-            else:
                 print("Processing transcription results...", flush=True)
             
             # Process results
@@ -1370,6 +1451,1232 @@ class MKVLanguageDetector:
         except Exception as e:
             logger.error(f"Unexpected error during full audio extraction: {e}")
             return None
+
+    def extract_subtitle_track(self, file_path: Path, subtitle_track_index: int, stream_index: int) -> Optional[Path]:
+        """Extract subtitle track to appropriate format for analysis."""
+        try:
+            # First, get codec information for this subtitle track
+            info = self.get_mkv_info(file_path)
+            subtitle_codec = None
+            
+            if 'streams' in info:
+                subtitle_count = 0
+                for stream in info['streams']:
+                    if stream.get('codec_type') == 'subtitle':
+                        if subtitle_count == subtitle_track_index:
+                            subtitle_codec = stream.get('codec_name', '').lower()
+                            if self.config.show_details:
+                                logger.info(f"Found subtitle track {subtitle_track_index}: codec='{subtitle_codec}', stream_index={stream.get('index', 'unknown')}")
+                            break
+                        subtitle_count += 1
+            
+            if self.config.show_details:
+                print(f"Subtitle codec for track {subtitle_track_index}: {subtitle_codec}")
+            
+            # Determine output format based on codec
+            # Image-based subtitles (PGS, VobSub, DVD) cannot be converted to text
+            image_based_codecs = ['hdmv_pgs_subtitle', 'pgs', 'dvdsub', 'dvbsub', 'dvd_subtitle', 's_hdmv/pgs']
+            text_based_codecs = ['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 's_text/utf8', 's_text/ass']
+            
+            # Check if codec name contains indicators
+            is_image_based = (subtitle_codec in image_based_codecs or 
+                             'pgs' in subtitle_codec or 
+                             'hdmv' in subtitle_codec or
+                             'dvd' in subtitle_codec)
+            
+            if is_image_based:
+                # For image-based subtitles, extract without conversion
+                temp_file = tempfile.NamedTemporaryFile(suffix='.sup', delete=False)
+                temp_path = Path(temp_file.name)
+                temp_file.close()
+                copy_codec = 'copy'
+                if self.config.show_details:
+                    print(f"Detected image-based subtitle (will extract as .sup)")
+            else:
+                # For text-based subtitles, convert to SRT
+                temp_file = tempfile.NamedTemporaryFile(suffix='.srt', delete=False)
+                temp_path = Path(temp_file.name)
+                temp_file.close()
+                copy_codec = 'srt'
+                if self.config.show_details:
+                    print(f"Detected text-based subtitle (will convert to .srt)")
+            
+            # Mapping strategies for subtitle extraction
+            mapping_strategies = [
+                f'0:s:{subtitle_track_index}',
+                f'0:{stream_index}',
+                f's:{subtitle_track_index}',
+            ]
+            
+            for map_strategy in mapping_strategies:
+                try:
+                    cmd = [
+                        self.ffmpeg, '-y', '-v', 'warning',
+                        '-i', str(file_path),
+                        '-map', map_strategy,
+                        '-c:s', copy_codec,
+                        str(temp_path)
+                    ]
+                    
+                    limited_cmd = limit_subprocess_resources(cmd)
+                    
+                    if self.config.show_details:
+                        print(f"Trying extraction with mapping: {map_strategy}")
+                    
+                    result = subprocess.run(limited_cmd, check=True, capture_output=True, 
+                                          text=True, encoding='utf-8', errors='replace')
+                    
+                    if temp_path.exists() and temp_path.stat().st_size > 100:
+                        if self.config.show_details:
+                            print(f"✓ Successfully extracted subtitle track {subtitle_track_index} ({temp_path.stat().st_size} bytes)")
+                        return temp_path
+                    else:
+                        if self.config.show_details:
+                            print(f"✗ File too small or doesn't exist: {temp_path.stat().st_size if temp_path.exists() else 0} bytes")
+                    
+                    if temp_path.exists():
+                        temp_path.unlink()
+                        
+                except subprocess.CalledProcessError as e:
+                    if self.config.show_details:
+                        print(f"✗ Failed with mapping {map_strategy}")
+                        if e.stderr:
+                            print(f"  Error: {e.stderr}")
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    continue
+            
+            logger.error("All subtitle extraction attempts failed")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Unexpected error during subtitle extraction: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def parse_srt_file(self, srt_path: Path) -> List[Dict]:
+        """Parse SRT subtitle file and return list of subtitle entries."""
+        try:
+            with open(srt_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            
+            # Split by double newlines to separate subtitle blocks
+            blocks = content.strip().split('\n\n')
+            subtitles = []
+            
+            for block in blocks:
+                lines = block.strip().split('\n')
+                if len(lines) >= 3:
+                    try:
+                        # Parse subtitle entry
+                        index = int(lines[0].strip())
+                        timing = lines[1].strip()
+                        text = '\n'.join(lines[2:])
+                        
+                        # Parse timing
+                        if ' --> ' in timing:
+                            start_time, end_time = timing.split(' --> ')
+                            
+                            subtitles.append({
+                                'index': index,
+                                'start': start_time.strip(),
+                                'end': end_time.strip(),
+                                'text': text.strip()
+                            })
+                    except (ValueError, IndexError):
+                        continue
+            
+            return subtitles
+            
+        except Exception as e:
+            logger.error(f"Error parsing SRT file: {e}")
+            return []
+
+    def get_subtitle_text_sample(self, subtitles: List[Dict], max_chars: int = 5000) -> str:
+        """Extract text sample from subtitles for language detection."""
+        text_parts = []
+        total_chars = 0
+        
+        # Sample from beginning, middle, and end
+        sample_indices = []
+        if len(subtitles) > 0:
+            sample_indices.append(0)  # Beginning
+        if len(subtitles) > 10:
+            sample_indices.append(len(subtitles) // 2)  # Middle
+        if len(subtitles) > 20:
+            sample_indices.append(len(subtitles) - 1)  # End
+        
+        for idx in sample_indices:
+            if idx < len(subtitles):
+                # Get a chunk of subtitles around this index
+                start_idx = max(0, idx - 5)
+                end_idx = min(len(subtitles), idx + 5)
+                
+                for sub in subtitles[start_idx:end_idx]:
+                    text = sub['text']
+                    # Remove SRT formatting tags
+                    text = re.sub(r'<[^>]+>', '', text)
+                    text = re.sub(r'\{[^}]+\}', '', text)
+                    text_parts.append(text)
+                    total_chars += len(text)
+                    
+                    if total_chars >= max_chars:
+                        break
+            
+            if total_chars >= max_chars:
+                break
+        
+        return ' '.join(text_parts)
+
+    def _convert_iso639_1_to_2(self, code: str) -> str:
+        """Convert ISO 639-1 (2-letter) to ISO 639-2 (3-letter) code."""
+        iso639_1_to_2_mapping = {
+            'en': 'eng', 'es': 'spa', 'fr': 'fre', 'de': 'ger', 'it': 'ita',
+            'pt': 'por', 'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi',
+            'ar': 'ara', 'hi': 'hin', 'nl': 'dut', 'sv': 'swe', 'no': 'nor',
+            'da': 'dan', 'fi': 'fin', 'pl': 'pol', 'cs': 'cze', 'hu': 'hun',
+            'el': 'gre', 'tr': 'tur', 'he': 'heb', 'th': 'tha', 'vi': 'vie',
+            'uk': 'ukr', 'bg': 'bul', 'ro': 'rum', 'sk': 'slo', 'sl': 'slv',
+            'sr': 'srp', 'hr': 'hrv', 'bs': 'bos', 'sq': 'alb', 'mk': 'mac',
+            'lt': 'lit', 'lv': 'lav', 'et': 'est', 'mt': 'mlt', 'is': 'ice',
+            'ga': 'gle', 'cy': 'wel', 'eu': 'baq', 'ca': 'cat', 'gl': 'glg',
+            'fa': 'per', 'ur': 'urd', 'bn': 'ben', 'gu': 'guj', 'pa': 'pan',
+            'ta': 'tam', 'te': 'tel', 'kn': 'kan', 'ml': 'mal', 'mr': 'mar',
+            'ne': 'nep', 'si': 'sin', 'my': 'bur', 'km': 'khm', 'lo': 'lao',
+            'bo': 'tib', 'mn': 'mon', 'kk': 'kaz', 'uz': 'uzb', 'ky': 'kir',
+            'tg': 'tgk', 'tk': 'tuk', 'az': 'aze', 'hy': 'arm', 'ka': 'geo',
+            'am': 'amh', 'sw': 'swa', 'yo': 'yor', 'ig': 'ibo', 'ha': 'hau',
+            'so': 'som', 'af': 'afr', 'zu': 'zul', 'xh': 'xho', 'ms': 'may',
+            'id': 'ind', 'tl': 'tgl', 'jv': 'jav', 'su': 'sun', 'eo': 'epo',
+            'la': 'lat'
+        }
+        
+        return iso639_1_to_2_mapping.get(code.lower(), code)
+
+    def _detect_language_by_characters(self, text: str, subtitle_count: int) -> Optional[Dict]:
+        """Fallback language detection using character analysis with improved confidence calculation."""
+        
+        if not text or len(text.strip()) < 10:
+            # Not enough text for reliable detection
+            return {
+                'language_code': 'und',
+                'confidence': 0.0,
+                'subtitle_count': subtitle_count
+            }
+        
+        # Count character types
+        latin_chars = sum(1 for c in text if ord(c) < 0x0250)
+        cyrillic_chars = sum(1 for c in text if 0x0400 <= ord(c) <= 0x04FF)
+        arabic_chars = sum(1 for c in text if 0x0600 <= ord(c) <= 0x06FF)
+        cjk_chars = sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF)
+        
+        total_chars = len(text.replace(' ', '').replace('\n', ''))  # Count only non-whitespace
+        
+        if total_chars == 0:
+            return {
+                'language_code': 'und',
+                'confidence': 0.0,
+                'subtitle_count': subtitle_count
+            }
+        
+        # Calculate confidence based on character distribution strength
+        cyrillic_ratio = cyrillic_chars / total_chars
+        arabic_ratio = arabic_chars / total_chars
+        cjk_ratio = cjk_chars / total_chars
+        latin_ratio = latin_chars / total_chars
+        
+        # Determine language based on character distribution with dynamic confidence
+        if cyrillic_ratio > 0.3:
+            # Confidence increases with higher ratio
+            confidence = min(0.9, 0.5 + cyrillic_ratio * 0.5)
+            return {'language_code': 'rus', 'confidence': confidence, 'subtitle_count': subtitle_count}
+        elif arabic_ratio > 0.3:
+            confidence = min(0.9, 0.5 + arabic_ratio * 0.5)
+            return {'language_code': 'ara', 'confidence': confidence, 'subtitle_count': subtitle_count}
+        elif cjk_ratio > 0.3:
+            confidence = min(0.85, 0.45 + cjk_ratio * 0.5)
+            return {'language_code': 'chi', 'confidence': confidence, 'subtitle_count': subtitle_count}
+        elif latin_ratio > 0.7:
+            # Lower confidence for Latin script as it could be many languages
+            # Confidence based on text length and ratio
+            base_confidence = 0.3
+            ratio_bonus = (latin_ratio - 0.7) * 0.3  # Up to 0.09 bonus
+            length_bonus = min(0.2, len(text) / 5000)  # Up to 0.2 bonus for longer text
+            confidence = min(0.65, base_confidence + ratio_bonus + length_bonus)
+            return {'language_code': 'eng', 'confidence': confidence, 'subtitle_count': subtitle_count}
+        
+        # If no clear script detected, return undefined with very low confidence
+        return {
+            'language_code': 'und',
+            'confidence': 0.1,
+            'subtitle_count': subtitle_count
+        }
+
+    def detect_subtitle_language(self, subtitle_path: Path, file_path: Path = None, 
+                                subtitle_track_index: int = None, stream_index: int = None) -> Optional[Dict]:
+        """Detect language of subtitle file using text analysis or OCR."""
+        try:
+            # Check file extension to determine subtitle type
+            if subtitle_path.suffix.lower() == '.sup':
+                # Image-based subtitle (PGS format)
+                if self.config.show_details:
+                    logger.warning("Image-based subtitle detected (PGS/SUP)")
+                    logger.warning("Language detection for image-based subtitles requires OCR")
+                    logger.warning("Install pytesseract and tesseract-ocr for image subtitle support:")
+                    logger.warning("  pip install pytesseract pillow")
+                    logger.warning("  https://github.com/tesseract-ocr/tesseract")
+                
+                # Try OCR if available
+                try:
+                    if file_path and subtitle_track_index is not None and stream_index is not None:
+                        return self._extract_pgs_images_and_ocr(file_path, subtitle_track_index, stream_index)
+                    else:
+                        return self._detect_language_via_ocr(subtitle_path)
+                except ImportError:
+                    if self.config.show_details:
+                        logger.error("OCR libraries not available - skipping image-based subtitle")
+                    return None
+            else:
+                # Text-based subtitle (SRT format)
+                subtitles = self.parse_srt_file(subtitle_path)
+                
+                if not subtitles:
+                    if self.config.show_details:
+                        logger.warning("No subtitle entries found")
+                    return None
+                
+                # Get text sample
+                text_sample = self.get_subtitle_text_sample(subtitles)
+                
+                if not text_sample or len(text_sample.strip()) < 50:
+                    if self.config.show_details:
+                        logger.warning("Insufficient subtitle text for language detection")
+                    # Return low confidence result for empty/minimal content
+                    return {
+                        'language_code': 'und',
+                        'confidence': 0.0,
+                        'subtitle_count': len(subtitles)
+                    }
+                
+                if self.config.show_details:
+                    logger.info(f"Analyzing {len(subtitles)} subtitle entries ({len(text_sample)} characters)")
+                
+                # Try to use langdetect library
+                try:
+                    import langdetect
+                    from langdetect import detect_langs
+                    
+                    # Set seed for consistent results
+                    langdetect.DetectorFactory.seed = 0
+                    
+                    # Detect language with confidence scores
+                    detected_langs = detect_langs(text_sample)
+                    
+                    if detected_langs:
+                        primary_lang = detected_langs[0]
+                        language_code = primary_lang.lang
+                        confidence = primary_lang.prob
+                        
+                        # Convert ISO 639-1 to ISO 639-2
+                        language_code = self._convert_iso639_1_to_2(language_code)
+                        
+                        if self.config.show_details:
+                            logger.info(f"Detected subtitle language: {language_code} (confidence: {confidence:.2f})")
+                            if len(detected_langs) > 1:
+                                logger.info(f"Other possibilities: {[(l.lang, f'{l.prob:.2f}') for l in detected_langs[1:3]]}")
+                        
+                        return {
+                            'language_code': language_code,
+                            'confidence': confidence,
+                            'subtitle_count': len(subtitles)
+                        }
+                    else:
+                        if self.config.show_details:
+                            logger.warning("langdetect returned no results")
+                        # Fallback to character analysis
+                        return self._detect_language_by_characters(text_sample, len(subtitles))
+                    
+                except ImportError:
+                    if self.config.show_details:
+                        logger.warning("langdetect library not installed. Install with: pip install langdetect")
+                        logger.warning("Falling back to basic text analysis")
+                    
+                    # Fallback: Use basic character analysis
+                    return self._detect_language_by_characters(text_sample, len(subtitles))
+                
+                except Exception as e:
+                    if self.config.show_details:
+                        logger.warning(f"Language detection failed: {e}")
+                    # Fallback to character analysis
+                    return self._detect_language_by_characters(text_sample, len(subtitles))
+                    
+        except Exception as e:
+            logger.error(f"Error detecting subtitle language: {e}")
+            return None
+    
+    def _detect_language_via_ocr(self, subtitle_path: Path) -> Optional[Dict]:
+        """Detect language from image-based subtitles using OCR."""
+        try:
+            import pytesseract
+            from PIL import Image
+            
+            logger.info("Attempting OCR on image-based subtitles...")
+            
+            # For PGS subtitles embedded in MKV, we need to extract directly from the video file
+            # Not from the already-extracted .sup file
+            return None  # Signal that we need a different approach
+            
+        except ImportError:
+            logger.error("pytesseract or PIL not installed")
+            logger.error("Install with: pip install pytesseract pillow")
+            return None
+        except Exception as e:
+            logger.error(f"OCR detection failed: {e}")
+            return None
+
+    def _extract_pgs_images_and_ocr(self, file_path: Path, subtitle_track_index: int, stream_index: int) -> Optional[Dict]:
+        """Extract PGS subtitle images directly from video file and perform OCR."""
+        try:
+            import pytesseract
+            from PIL import Image
+    
+            if sys.platform == 'win32':
+                # Common Tesseract installation paths on Windows
+                tesseract_paths = [
+                    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                    r"C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe".format(os.getenv('USERNAME')),
+                ]
+                
+                for path in tesseract_paths:
+                    if os.path.exists(path):
+                        pytesseract.pytesseract.tesseract_cmd = path
+                        break
+    
+            # Check if Tesseract is available
+            try:
+                pytesseract.get_tesseract_version()
+            except:
+                logger.error("Tesseract OCR not found. Please install:")
+                logger.error("Windows: https://github.com/UB-Mannheim/tesseract/wiki")
+                logger.error("Linux: apt-get install tesseract-ocr")
+                logger.error("Mac: brew install tesseract")
+                return None
+            
+            logger.info("Extracting subtitle images for OCR analysis...")
+            
+            temp_dir = tempfile.mkdtemp()
+            try:
+                # Method 1: Try extracting using subtitle filter
+                cmd = [
+                    self.ffmpeg, '-y', '-v', 'warning',
+                    '-i', str(file_path),
+                    '-filter_complex', f'[0:s:{subtitle_track_index}]scale=iw:ih[sub]',
+                    '-map', '[sub]',
+                    '-frames:v', '50',  # Extract up to 50 subtitle frames
+                    '-vsync', '0',  # Don't duplicate frames
+                    f'{temp_dir}/sub_%04d.png'
+                ]
+                
+                limited_cmd = limit_subprocess_resources(cmd)
+                
+                if self.config.show_details:
+                    logger.info(f"Attempting Method 1: subtitle filter extraction")
+                
+                try:
+                    result = subprocess.run(limited_cmd, capture_output=True, text=True, 
+                                          encoding='utf-8', errors='replace', timeout=120)
+                except subprocess.TimeoutExpired:
+                    logger.warning("Method 1 timed out")
+                
+                # Check if any images were extracted
+                image_files = list(Path(temp_dir).glob('sub_*.png'))
+                
+                # Method 2: If Method 1 failed, try direct stream copy and conversion
+                if not image_files:
+                    if self.config.show_details:
+                        logger.info("Method 1 failed, trying Method 2: direct stream extraction")
+                    
+                    # First extract the subtitle stream to a temporary file
+                    temp_sub_file = Path(temp_dir) / "subtitles.sup"
+                    
+                    cmd = [
+                        self.ffmpeg, '-y', '-v', 'warning',
+                        '-i', str(file_path),
+                        '-map', f'0:s:{subtitle_track_index}',
+                        '-c', 'copy',
+                        str(temp_sub_file)
+                    ]
+                    
+                    limited_cmd = limit_subprocess_resources(cmd)
+                    
+                    try:
+                        result = subprocess.run(limited_cmd, capture_output=True, text=True,
+                                              encoding='utf-8', errors='replace', timeout=60)
+                        
+                        if temp_sub_file.exists() and temp_sub_file.stat().st_size > 0:
+                            # Now try to extract images from the SUP file
+                            cmd = [
+                                self.ffmpeg, '-y', '-v', 'warning',
+                                '-i', str(temp_sub_file),
+                                '-frames:v', '50',
+                                '-vsync', '0',
+                                f'{temp_dir}/sub_%04d.png'
+                            ]
+                            
+                            limited_cmd = limit_subprocess_resources(cmd)
+                            
+                            try:
+                                result = subprocess.run(limited_cmd, capture_output=True, text=True,
+                                                      encoding='utf-8', errors='replace', timeout=120)
+                            except subprocess.TimeoutExpired:
+                                logger.warning("Method 2 timed out")
+                            
+                            image_files = list(Path(temp_dir).glob('sub_*.png'))
+                            
+                    except subprocess.CalledProcessError as e:
+                        if self.config.show_details:
+                            logger.debug(f"Method 2 failed: {e}")
+                
+                # Method 3: Use BDSup2Sub if available (external tool for PGS extraction)
+                if not image_files:
+                    if self.config.show_details:
+                        logger.info("Method 2 failed, trying Method 3: frame extraction with overlay")
+                    
+                    # Extract video frames where subtitles appear
+                    cmd = [
+                        self.ffmpeg, '-y', '-v', 'warning',
+                        '-i', str(file_path),
+                        '-filter_complex', f'[0:v][0:s:{subtitle_track_index}]overlay[v]',
+                        '-map', '[v]',
+                        '-frames:v', '50',
+                        '-vsync', '0',
+                        '-q:v', '2',  # High quality
+                        f'{temp_dir}/sub_%04d.png'
+                    ]
+                    
+                    limited_cmd = limit_subprocess_resources(cmd)
+                    
+                    try:
+                        result = subprocess.run(limited_cmd, capture_output=True, text=True,
+                                              encoding='utf-8', errors='replace', timeout=120)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Method 3 timed out")
+                    
+                    image_files = list(Path(temp_dir).glob('sub_*.png'))
+                
+                if not image_files:
+                    logger.warning("No subtitle images extracted using any method")
+                    logger.warning("PGS subtitle extraction is complex and may not work with all files")
+                    logger.warning("Consider using external tools like BDSup2Sub for PGS subtitle extraction")
+                    return None
+                
+                if self.config.show_details:
+                    logger.info(f"Extracted {len(image_files)} subtitle images")
+                
+                # OCR the extracted images
+                ocr_texts = []
+                successful_ocr = 0
+                
+                for img_file in image_files[:30]:  # Process up to 30 images
+                    try:
+                        img = Image.open(img_file)
+                        
+                        # Preprocess image for better OCR
+                        # Convert to grayscale and increase contrast
+                        img = img.convert('L')
+                        
+                        # Enhance contrast
+                        from PIL import ImageEnhance
+                        enhancer = ImageEnhance.Contrast(img)
+                        img = enhancer.enhance(2.0)
+                        
+                        # OCR with multiple language support
+                        text = pytesseract.image_to_string(img, config='--psm 6')
+                        
+                        if text.strip() and len(text.strip()) > 2:
+                            ocr_texts.append(text.strip())
+                            successful_ocr += 1
+                            
+                            if self.config.show_details and successful_ocr <= 3:
+                                logger.info(f"OCR sample {successful_ocr}: '{text.strip()[:50]}...'")
+                                
+                    except Exception as e:
+                        if self.config.show_details:
+                            logger.debug(f"Failed to OCR {img_file.name}: {e}")
+                        continue
+                
+                if not ocr_texts:
+                    logger.warning("No text extracted from subtitle images via OCR")
+                    logger.warning("This could mean:")
+                    logger.warning("  1. The subtitles are in a language not supported by Tesseract")
+                    logger.warning("  2. The image quality is too low for OCR")
+                    logger.warning("  3. The extraction method didn't capture subtitle content properly")
+                    return None
+                
+                logger.info(f"Successfully OCR'd {successful_ocr} subtitle images")
+                
+                # Combine OCR texts
+                combined_text = ' '.join(ocr_texts)
+                
+                if len(combined_text.strip()) < 50:
+                    logger.warning(f"Insufficient OCR text for detection ({len(combined_text)} chars)")
+                    return None
+                
+                # Detect language using langdetect
+                try:
+                    import langdetect
+                    from langdetect import detect_langs
+                    
+                    detected_langs = detect_langs(combined_text)
+                    
+                    if detected_langs:
+                        primary_lang = detected_langs[0]
+                        language_code = self._convert_iso639_1_to_2(primary_lang.lang)
+                        
+                        # Lower confidence for OCR-based detection
+                        confidence = primary_lang.prob * 0.75  # Reduce confidence due to OCR uncertainty
+                        
+                        logger.info(f"OCR detected language: {language_code} (confidence: {confidence:.2f})")
+                        
+                        return {
+                            'language_code': language_code,
+                            'confidence': confidence,
+                            'subtitle_count': len(ocr_texts)
+                        }
+                    else:
+                        logger.warning("Language detection returned no results")
+                        return None
+                        
+                except ImportError:
+                    logger.warning("langdetect not available for OCR text analysis")
+                    return self._detect_language_by_characters(combined_text, len(ocr_texts))
+                except Exception as e:
+                    logger.warning(f"Language detection failed: {e}")
+                    return self._detect_language_by_characters(combined_text, len(ocr_texts))
+                    
+            finally:
+                # Cleanup temp directory
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            return None
+            
+        except ImportError as e:
+            logger.error(f"Required library not installed: {e}")
+            logger.error("Install with: pip install pytesseract pillow")
+            return None
+        except Exception as e:
+            logger.error(f"OCR detection failed: {e}")
+            import traceback
+            if self.config.show_details:
+                traceback.print_exc()
+            return None
+
+    def _parse_srt_time(self, time_str: str) -> float:
+        """Parse SRT timestamp to seconds."""
+        # Format: HH:MM:SS,mmm
+        time_str = time_str.replace(',', '.')
+        parts = time_str.split(':')
+        
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = float(parts[2])
+        
+        return hours * 3600 + minutes * 60 + seconds
+
+    def detect_forced_subtitles(self, file_path: Path, subtitle_track_index: int, stream_index: int, 
+                               audio_track_index: int = 0, subtitle_path: Path = None) -> bool:
+        """
+        Detect if subtitle track is forced (only shows for foreign language parts).
+        Compares subtitle timing coverage against actual speech timing from audio.
+        
+        Args:
+            file_path: Path to the video file
+            subtitle_track_index: Index of the subtitle track
+            stream_index: Stream index in the file
+            audio_track_index: Index of audio track to analyze (default: 0)
+            subtitle_path: Optional pre-extracted subtitle path (avoids re-extraction)
+        """
+        try:
+            # Extract or use provided subtitle track
+            if subtitle_path is None:
+                subtitle_path = self.extract_subtitle_track(file_path, subtitle_track_index, stream_index)
+                should_cleanup = True
+            else:
+                should_cleanup = False
+                
+            if not subtitle_path:
+                if self.config.show_details:
+                    logger.warning("Could not extract subtitle track for forced detection")
+                return False
+            
+            try:
+                # Check if it's an image-based subtitle (PGS/SUP)
+                is_image_based = subtitle_path.suffix.lower() == '.sup'
+                
+                if is_image_based:
+                    # For image-based subtitles, analyze using frame count heuristics
+                    return self._detect_forced_pgs_subtitles(file_path, subtitle_track_index, 
+                                                            stream_index, audio_track_index)
+                
+                # For text-based subtitles, use the existing method
+                subtitles = self.parse_srt_file(subtitle_path)
+                
+                if not subtitles:
+                    return False
+                
+                # Get file duration
+                duration = self.get_file_duration(file_path)
+                if duration <= 0:
+                    if self.config.show_details:
+                        logger.warning("Could not determine file duration")
+                    return False
+                
+                # Calculate total subtitle duration and timing
+                total_subtitle_duration = 0.0
+                subtitle_timings = []
+                
+                for sub in subtitles:
+                    try:
+                        start_seconds = self._parse_srt_time(sub['start'])
+                        end_seconds = self._parse_srt_time(sub['end'])
+                        subtitle_duration = end_seconds - start_seconds
+                        total_subtitle_duration += subtitle_duration
+                        subtitle_timings.append((start_seconds, end_seconds))
+                    except:
+                        continue
+                
+                # Calculate subtitle coverage percentage
+                subtitle_coverage = (total_subtitle_duration / duration) * 100
+                subtitle_density = len(subtitles) / (duration / 60)  # Subtitles per minute
+                
+                if self.config.show_details:
+                    logger.info(f"Subtitle coverage: {subtitle_coverage:.1f}% of total duration")
+                    logger.info(f"Subtitle count: {len(subtitles)} ({subtitle_density:.1f} per minute)")
+                
+                # Quick heuristics first
+                if subtitle_coverage < 15:
+                    if self.config.show_details:
+                        logger.info("Very low coverage (<15%) - likely forced subtitles")
+                    return True
+                
+                if subtitle_density < 3:
+                    if self.config.show_details:
+                        logger.info("Very low density (<3/min) - likely forced subtitles")
+                    return True
+                
+                if subtitle_coverage > 60:
+                    if self.config.show_details:
+                        logger.info("High coverage (>60%) - not forced subtitles")
+                    return False
+                
+                # For borderline cases, analyze audio
+                if self.config.show_details:
+                    logger.info("Borderline coverage - analyzing audio for speech patterns...")
+                
+                # Extract FULL audio track for accurate analysis
+                audio_path = self.extract_full_audio_track(file_path, audio_track_index, stream_index)
+                if not audio_path:
+                    if self.config.show_details:
+                        logger.warning("Could not extract audio, using subtitle-only heuristics")
+                    is_forced = subtitle_coverage < 25 or subtitle_density < 5
+                    return is_forced
+                
+                try:
+                    # Use Whisper to detect speech segments with VAD
+                    if self.config.show_details:
+                        logger.info("Running speech detection on full audio track...")
+                    
+                    segments, info = self.whisper_model.transcribe(
+                        str(audio_path),
+                        language=None,
+                        task="transcribe",
+                        beam_size=1,
+                        best_of=1,
+                        temperature=0.0,
+                        vad_filter=True,
+                        vad_parameters={
+                            "min_speech_duration_ms": 250,
+                            "max_speech_duration_s": 30
+                        },
+                        word_timestamps=True
+                    )
+                    
+                    # Collect speech timings
+                    speech_timings = []
+                    for segment in segments:
+                        speech_timings.append((segment.start, segment.end))
+                    
+                    if not speech_timings:
+                        if self.config.show_details:
+                            logger.info("No speech detected in audio - likely forced or silent")
+                        return True
+                    
+                    # Calculate speech coverage
+                    total_speech_duration = sum(end - start for start, end in speech_timings)
+                    speech_coverage = (total_speech_duration / duration) * 100
+                    
+                    # Calculate overlap between subtitles and speech
+                    overlap_duration = 0.0
+                    for sub_start, sub_end in subtitle_timings:
+                        for speech_start, speech_end in speech_timings:
+                            overlap_start = max(sub_start, speech_start)
+                            overlap_end = min(sub_end, speech_end)
+                            if overlap_start < overlap_end:
+                                overlap_duration += (overlap_end - overlap_start)
+                    
+                    speech_with_subtitles = (overlap_duration / total_speech_duration * 100) if total_speech_duration > 0 else 0
+                    coverage_ratio = subtitle_coverage / speech_coverage if speech_coverage > 0 else 0
+                    
+                    if self.config.show_details:
+                        logger.info(f"Speech coverage: {speech_coverage:.1f}% of total duration")
+                        logger.info(f"Speech with subtitles: {speech_with_subtitles:.1f}%")
+                        logger.info(f"Coverage ratio (sub/speech): {coverage_ratio:.2f}")
+                    
+                    # Determine if forced
+                    is_forced = False
+                    
+                    if speech_with_subtitles < 50:
+                        is_forced = True
+                        if self.config.show_details:
+                            logger.info(f"Only {speech_with_subtitles:.1f}% of speech has subtitles - likely forced")
+                    
+                    if coverage_ratio < 0.4:
+                        is_forced = True
+                        if self.config.show_details:
+                            logger.info(f"Subtitle coverage much less than speech ({coverage_ratio:.2f}) - likely forced")
+                    
+                    if subtitle_coverage < 20 and subtitle_density < 5:
+                        is_forced = True
+                        if self.config.show_details:
+                            logger.info("Low coverage and density - likely forced")
+                    
+                    if speech_with_subtitles > 80:
+                        is_forced = False
+                        if self.config.show_details:
+                            logger.info(f"Most speech has subtitles ({speech_with_subtitles:.1f}%) - not forced")
+                    
+                    return is_forced
+                    
+                finally:
+                    if audio_path and audio_path.exists():
+                        audio_path.unlink()
+                
+            finally:
+                # Only clean up if we extracted it ourselves
+                if should_cleanup and subtitle_path and subtitle_path.exists():
+                    subtitle_path.unlink()
+            
+        except Exception as e:
+            logger.error(f"Error detecting forced subtitles: {e}")
+            if self.config.show_details:
+                import traceback
+                traceback.print_exc()
+            return False
+
+    def _detect_forced_pgs_subtitles(self, file_path: Path, subtitle_track_index: int, 
+                                    stream_index: int, audio_track_index: int = 0) -> bool:
+        """
+        Detect if PGS/image-based subtitle track is forced using frame count analysis.
+        
+        PGS subtitles are stored as images, so we can't parse text timing.
+        Instead, we analyze:
+        1. Total number of subtitle frames
+        2. Distribution of frames across the video duration
+        3. Comparison with audio speech patterns (optional)
+        """
+        try:
+            if self.config.show_details:
+                logger.info("Analyzing PGS subtitle using frame count method...")
+            
+            # Get file duration
+            duration = self.get_file_duration(file_path)
+            if duration <= 0:
+                if self.config.show_details:
+                    logger.warning("Could not determine file duration")
+                return False
+            
+            # Use ffprobe to count subtitle frames
+            try:
+                cmd = [
+                    self.ffprobe, '-v', 'error',
+                    '-select_streams', f's:{subtitle_track_index}',
+                    '-count_packets',
+                    '-show_entries', 'stream=nb_read_packets',
+                    '-of', 'csv=p=0',
+                    str(file_path)
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True, 
+                                      encoding='utf-8', errors='replace')
+                
+                frame_count = int(result.stdout.strip())
+                
+                if self.config.show_details:
+                    logger.info(f"PGS subtitle has {frame_count} frames")
+                
+            except (subprocess.CalledProcessError, ValueError) as e:
+                if self.config.show_details:
+                    logger.warning(f"Could not count PGS frames: {e}")
+                return False
+            
+            # Calculate frames per minute
+            frames_per_minute = frame_count / (duration / 60)
+            
+            if self.config.show_details:
+                logger.info(f"PGS frame density: {frames_per_minute:.1f} frames/minute")
+            
+            # Heuristics for PGS forced subtitles:
+            # - Forced subtitles typically have very few frames (< 100 for a movie)
+            # - Or very low density (< 5 frames per minute)
+            
+            if frame_count < 100:
+                if self.config.show_details:
+                    logger.info(f"Very low frame count ({frame_count}) - likely forced subtitles")
+                return True
+            
+            if frames_per_minute < 5:
+                if self.config.show_details:
+                    logger.info(f"Very low frame density ({frames_per_minute:.1f}/min) - likely forced subtitles")
+                return True
+            
+            if frames_per_minute > 30:
+                if self.config.show_details:
+                    logger.info(f"High frame density ({frames_per_minute:.1f}/min) - not forced subtitles")
+                return False
+            
+            # For borderline cases (5-30 frames/min), we could optionally analyze audio
+            # but that's expensive, so use conservative threshold
+            if frames_per_minute < 15:
+                if self.config.show_details:
+                    logger.info(f"Low-to-moderate frame density ({frames_per_minute:.1f}/min) - likely forced subtitles")
+                return True
+            
+            if self.config.show_details:
+                logger.info(f"Moderate frame density ({frames_per_minute:.1f}/min) - probably not forced")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error detecting forced PGS subtitles: {e}")
+            if self.config.show_details:
+                import traceback
+                traceback.print_exc()
+            return False
+
+    def detect_sdh_subtitles(self, subtitle_path: Path) -> bool:
+            """
+            Detect if subtitles are SDH (Subtitles for the Deaf and Hard of Hearing).
+            SDH subtitles contain sound effect descriptions and speaker identifications.
+            """
+            try:
+                subtitles = self.parse_srt_file(subtitle_path)
+                
+                if not subtitles:
+                    return False
+                
+                # Must contain letters/words, not just styling tags
+                sdh_patterns = [
+                    r'\[[A-Za-z\s]{3,}\]',  # [door closes], [music playing] - at least 3 letters
+                    r'\([A-Za-z\s]{3,}\)',  # (sighs), (footsteps) - at least 3 letters
+                    r'♪[^♪]+♪',              # ♪ music ♪
+                    r'\*[A-Za-z\s]{3,}\*',  # *laughs* - at least 3 letters
+                ]
+                
+                sdh_indicator_count = 0
+                total_text_length = 0
+                
+                # Common SDH keywords that appear in brackets/parentheses
+                sdh_keywords = [
+                    'narrator', 'narrating', 'speaking', 'whispering', 'shouting', 'yelling', 'screaming',
+                    'music', 'playing', 'door', 'closes', 'opens', 'phone', 'ringing', 'rings',
+                    'footsteps', 'sighs', 'sigh', 'laughs', 'laugh', 'cries', 'cry', 'crying',
+                    'knocking', 'knock', 'barking', 'bark', 'meowing', 'beeping', 'beep',
+                    'gunshot', 'explosion', 'thunder', 'applause', 'cheering', 'clapping',
+                    'breathing', 'coughing', 'snoring', 'groaning', 'grunting',
+                    'chatter', 'chattering', 'murmuring', 'rustling', 'creaking',
+                    'dramatic music', 'tense music', 'suspenseful music', 'upbeat music',
+                    'in distance', 'muffled', 'echoing', 'faintly'
+                ]
+                
+                for sub in subtitles:
+                    text = sub['text']
+                    total_text_length += len(text)
+                    
+                    # Check if any pattern matches
+                    has_sdh_indicator = False
+                    for pattern in sdh_patterns:
+                        matches = re.findall(pattern, text, re.IGNORECASE)
+                        if matches:
+                            # Verify that the match contains actual SDH keywords
+                            for match in matches:
+                                # Extract just the text content (remove brackets/parentheses)
+                                content = re.sub(r'[\[\]\(\)\*♪]', '', match).strip().lower()
+                                
+                                # Check if it contains SDH keywords
+                                if any(keyword in content for keyword in sdh_keywords):
+                                    has_sdh_indicator = True
+                                    break
+                        
+                        if has_sdh_indicator:
+                            break
+                    
+                    if has_sdh_indicator:
+                        sdh_indicator_count += 1
+                
+                # Calculate SDH indicator ratio
+                sdh_ratio = sdh_indicator_count / len(subtitles) if subtitles else 0
+                
+                if self.config.show_details:
+                    logger.info(f"SDH indicators found in {sdh_indicator_count}/{len(subtitles)} subtitles ({sdh_ratio*100:.1f}%)")
+                
+                # If more than 10% of subtitles contain SDH indicators, classify as SDH
+                # (Lowered from 15% since we're now more specific)
+                is_sdh = sdh_ratio > 0.10
+                
+                # Additional check: Look for common SDH phrases in the full text
+                # This catches cases where SDH content might not always be in brackets
+                full_text = ' '.join([sub['text'].lower() for sub in subtitles])
+                
+                # Count phrases that appear in typical SDH contexts
+                sdh_phrase_patterns = [
+                    r'\bnarrator\b', r'\bspeaking\b', r'\bwhispering\b', r'\bshouting\b',
+                    r'\bmusic playing\b', r'\bdoor closes\b', r'\bphone ringing\b',
+                    r'\bfootsteps\b', r'\bsighs\b', r'\blaughs\b', r'\bcries\b',
+                    r'\bin the distance\b', r'\bmuffled\b', r'\bechoing\b',
+                    r'\bdramatic music\b', r'\btense music\b'
+                ]
+                
+                sdh_phrase_count = sum(1 for pattern in sdh_phrase_patterns 
+                                      if re.search(pattern, full_text))
+                
+                if sdh_phrase_count >= 3:
+                    is_sdh = True
+                    if self.config.show_details:
+                        logger.info(f"Found {sdh_phrase_count} SDH phrase patterns")
+                
+                return is_sdh
+                
+            except Exception as e:
+                logger.error(f"Error detecting SDH subtitles: {e}")
+                return False
+
+    def _get_language_name(self, language_code: str) -> str:
+        """Convert language code to human-readable name."""
+        language_names = {
+            'eng': 'English', 'spa': 'Spanish', 'fre': 'French', 'ger': 'German',
+            'ita': 'Italian', 'por': 'Portuguese', 'rus': 'Russian', 'jpn': 'Japanese',
+            'chi': 'Chinese', 'kor': 'Korean', 'ara': 'Arabic', 'hin': 'Hindi',
+            'dut': 'Dutch', 'swe': 'Swedish', 'nor': 'Norwegian', 'dan': 'Danish',
+            'fin': 'Finnish', 'pol': 'Polish', 'cze': 'Czech', 'hun': 'Hungarian',
+            'gre': 'Greek', 'tur': 'Turkish', 'heb': 'Hebrew', 'tha': 'Thai',
+            'vie': 'Vietnamese', 'ukr': 'Ukrainian', 'bul': 'Bulgarian',
+            'rum': 'Romanian', 'slo': 'Slovak', 'slv': 'Slovenian', 'srp': 'Serbian',
+            'hrv': 'Croatian', 'bos': 'Bosnian', 'zxx': 'No Linguistic Content',
+            'alb': 'Albanian', 'mac': 'Macedonian', 'lit': 'Lithuanian', 'lav': 'Latvian',
+            'est': 'Estonian', 'mlt': 'Maltese', 'ice': 'Icelandic', 'gle': 'Irish',
+            'wel': 'Welsh', 'baq': 'Basque', 'cat': 'Catalan', 'glg': 'Galician',
+            'per': 'Persian', 'urd': 'Urdu', 'ben': 'Bengali', 'guj': 'Gujarati',
+            'pan': 'Punjabi', 'tam': 'Tamil', 'tel': 'Telugu', 'kan': 'Kannada',
+            'mal': 'Malayalam', 'mar': 'Marathi', 'nep': 'Nepali', 'sin': 'Sinhalese',
+            'bur': 'Burmese', 'khm': 'Khmer', 'lao': 'Lao', 'tib': 'Tibetan',
+            'mon': 'Mongolian', 'kaz': 'Kazakh', 'uzb': 'Uzbek', 'kir': 'Kyrgyz',
+            'tgk': 'Tajik', 'tuk': 'Turkmen', 'aze': 'Azerbaijani', 'arm': 'Armenian',
+            'geo': 'Georgian', 'amh': 'Amharic', 'swa': 'Swahili', 'yor': 'Yoruba',
+            'ibo': 'Igbo', 'hau': 'Hausa', 'som': 'Somali', 'afr': 'Afrikaans',
+            'zul': 'Zulu', 'xho': 'Xhosa', 'may': 'Malay', 'ind': 'Indonesian',
+            'tgl': 'Tagalog', 'jav': 'Javanese', 'sun': 'Sundanese', 'epo': 'Esperanto',
+            'lat': 'Latin'
+        }
+        
+        return language_names.get(language_code, language_code.upper())
+
+    def update_subtitle_metadata(self, file_path: Path, track_index: int, language_code: str,
+                                is_forced: bool = False, is_sdh: bool = False,
+                                dry_run: bool = False) -> bool:
+        """Update subtitle track metadata including language, name, and flags."""
+        
+        # Build track name
+        language_name = self._get_language_name(language_code)
+        track_name_parts = [language_name]
+        
+        if is_forced:
+            track_name_parts.append("[Forced]")
+        if is_sdh:
+            track_name_parts.append("[SDH]")
+        
+        track_name = " ".join(track_name_parts)
+        
+        if dry_run:
+            forced_flag = " (forced)" if is_forced else ""
+            sdh_flag = " (SDH)" if is_sdh else ""
+            print(f"[DRY RUN] Would update subtitle track {track_index} in {file_path.name}:")
+            print(f"           Language: {language_code}, Name: '{track_name}'{forced_flag}{sdh_flag}")
+            return True
+        
+        try:
+            # Build mkvpropedit command
+            cmd = [
+                self.mkvpropedit, str(file_path),
+                '--edit', f'track:s{track_index + 1}',
+                '--set', f'language={language_code}',
+                '--set', f'name={track_name}'
+            ]
+            
+            # Add forced flag if applicable
+            if is_forced:
+                cmd.extend(['--set', 'flag-forced=1'])
+            else:
+                cmd.extend(['--set', 'flag-forced=0'])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            if self.config.show_details:
+                logger.info(f"Updated subtitle track {track_index} in {file_path.name}")
+                logger.info(f"  Language: {language_code}, Name: '{track_name}'")
+                if is_forced:
+                    logger.info(f"  Marked as forced")
+                if is_sdh:
+                    logger.info(f"  Marked as SDH")
+            
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error updating subtitle metadata for {file_path}: {e}")
+            return False
+
+    def process_subtitle_tracks(self, file_path: Path) -> Dict:
+        """Process all subtitle tracks in a file."""
+        results = {
+            'subtitle_tracks_found': 0,
+            'processed_subtitle_tracks': [],
+            'failed_subtitle_tracks': [],
+            'skipped_subtitle_tracks': [],
+            'subtitle_errors': []
+        }
+        
+        if not self.config.process_subtitles:
+            return results
+        
+        # Find subtitle tracks
+        if self.config.reprocess_all_subtitles:
+            subtitle_tracks = self.find_all_subtitle_tracks(file_path)
+            track_type = "all subtitle"
+        else:
+            undefined_tracks = self.find_undefined_subtitle_tracks(file_path)
+            subtitle_tracks = []
+            for subtitle_track_index, stream_info, stream_index in undefined_tracks:
+                subtitle_tracks.append((subtitle_track_index, stream_info, stream_index, 'und'))
+            track_type = "undefined subtitle"
+        
+        results['subtitle_tracks_found'] = len(subtitle_tracks)
+        
+        if not subtitle_tracks:
+            if self.config.show_details:
+                logger.info(f"No {track_type} tracks found in {file_path.name}")
+            return results
+        
+        if self.config.show_details:
+            print(f"Found {len(subtitle_tracks)} {track_type} track(s) to process")
+        
+        # Process each subtitle track
+        for track_data in subtitle_tracks:
+            if len(track_data) == 4:
+                subtitle_track_index, stream_info, stream_index, current_language = track_data
+            else:
+                subtitle_track_index, stream_info, stream_index = track_data
+                current_language = 'und'
+            
+            # Extract subtitle ONCE and reuse for all analyses
+            subtitle_path = None
+            
+            try:
+                if self.config.show_details:
+                    print(f"Processing subtitle track {subtitle_track_index}...")
+                
+                # Extract subtitle (ONCE)
+                subtitle_path = self.extract_subtitle_track(file_path, subtitle_track_index, stream_index)
+                if not subtitle_path:
+                    results['failed_subtitle_tracks'].append(subtitle_track_index)
+                    results['subtitle_errors'].append(f"Failed to extract subtitle track {subtitle_track_index}")
+                    continue
+                
+                # Detect language - pass the already extracted subtitle path
+                language_result = self.detect_subtitle_language(
+                    subtitle_path, 
+                    file_path=file_path,
+                    subtitle_track_index=subtitle_track_index,
+                    stream_index=stream_index
+                )
+                
+                if not language_result:
+                    results['failed_subtitle_tracks'].append(subtitle_track_index)
+                    results['subtitle_errors'].append(f"Failed to detect language for subtitle track {subtitle_track_index}")
+                    continue
+                
+                language_code = language_result['language_code']
+                confidence = language_result['confidence']
+                
+                # Check confidence threshold - SKIP instead of prompting
+                if confidence < self.config.subtitle_confidence_threshold:
+                    logger.warning(f"Subtitle track {subtitle_track_index} confidence ({confidence:.2f}) below threshold ({self.config.subtitle_confidence_threshold}) - skipping")
+                    results['skipped_subtitle_tracks'].append({
+                        'track_index': subtitle_track_index,
+                        'detected_language': language_code,
+                        'confidence': confidence,
+                        'reason': 'confidence_below_threshold'
+                    })
+                    continue
+                
+                # Detect forced subtitles (reuse extracted subtitle)
+                is_forced = False
+                if self.config.analyze_forced_subtitles:
+                    if self.config.show_details:
+                        print(f"Analyzing if subtitle track {subtitle_track_index} is forced...")
+                    is_forced = self.detect_forced_subtitles(
+                        file_path, subtitle_track_index, stream_index,
+                        subtitle_path=subtitle_path  # Pass the already extracted subtitle
+                    )
+                
+                # Detect SDH (reuse extracted subtitle)
+                is_sdh = False
+                if self.config.detect_sdh_subtitles:
+                    if self.config.show_details:
+                        print(f"Analyzing if subtitle track {subtitle_track_index} is SDH...")
+                    is_sdh = self.detect_sdh_subtitles(subtitle_path)
+                
+                # Update metadata
+                success = self.update_subtitle_metadata(
+                    file_path, subtitle_track_index, language_code,
+                    is_forced, is_sdh, self.config.dry_run
+                )
+                
+                if success:
+                    results['processed_subtitle_tracks'].append({
+                        'track_index': subtitle_track_index,
+                        'detected_language': language_code,
+                        'previous_language': current_language,
+                        'confidence': confidence,
+                        'is_forced': is_forced,
+                        'is_sdh': is_sdh
+                    })
+                else:
+                    results['failed_subtitle_tracks'].append(subtitle_track_index)
+                    results['subtitle_errors'].append(f"Failed to update subtitle track {subtitle_track_index}")
+                
+            except Exception as e:
+                error_msg = f"Error processing subtitle track {subtitle_track_index}: {str(e)}"
+                logger.error(error_msg)
+                results['failed_subtitle_tracks'].append(subtitle_track_index)
+                results['subtitle_errors'].append(error_msg)
+            
+            finally:
+                # Clean up temporary subtitle file
+                if subtitle_path and subtitle_path.exists():
+                    subtitle_path.unlink()
+        
+        return results
 			
     def detect_language_with_fallback(self, audio_path: Path) -> Optional[str]:
         if not audio_path.exists() or audio_path.stat().st_size < 1000:
@@ -1716,7 +3023,8 @@ class MKVLanguageDetector:
             'undefined_tracks': 0,
             'processed_tracks': [],
             'failed_tracks': [],
-            'errors': []
+            'errors': [],
+            'subtitle_results': None
         }
         
         print(f"Processing: {file_path.name}")
@@ -1752,41 +3060,46 @@ class MKVLanguageDetector:
         if not audio_tracks:
             if self.config.show_details:
                 logger.info(f"No {track_type} tracks found in {mkv_path.name}")
-            return results
-        
-        # Process each track
-        for track_data in audio_tracks:
-            if len(track_data) == 4:
-                audio_track_index, stream_info, stream_index, current_language = track_data
-            else:
-                audio_track_index, stream_info, stream_index = track_data
-                current_language = 'und'
-                
-            try:
-                # Detect language with retries
-                language_code = self.detect_language_with_retries(mkv_path, audio_track_index, stream_index, max_retries=3)
-                if not language_code:
-                    results['failed_tracks'].append(audio_track_index)
-                    results['errors'].append(f"Failed to detect language for track {audio_track_index}")
-                    continue
-                
-                # Update metadata
-                success = self.update_mkv_language(mkv_path, audio_track_index, language_code, self.config.dry_run)
-                if success:
-                    results['processed_tracks'].append({
-                        'track_index': audio_track_index,
-                        'detected_language': language_code,
-                        'previous_language': current_language
-                    })
+        else:
+            # Process each track
+            for track_data in audio_tracks:
+                if len(track_data) == 4:
+                    audio_track_index, stream_info, stream_index, current_language = track_data
                 else:
-                    results['failed_tracks'].append(audio_track_index)
-                    results['errors'].append(f"Failed to update track {audio_track_index}")
+                    audio_track_index, stream_info, stream_index = track_data
+                    current_language = 'und'
                     
-            except Exception as e:
-                error_msg = f"Error processing track {audio_track_index}: {str(e)}"
-                logger.error(error_msg)
-                results['failed_tracks'].append(audio_track_index)
-                results['errors'].append(error_msg)
+                try:
+                    # Detect language with retries
+                    language_code = self.detect_language_with_retries(mkv_path, audio_track_index, stream_index, max_retries=3)
+                    if not language_code:
+                        results['failed_tracks'].append(audio_track_index)
+                        results['errors'].append(f"Failed to detect language for track {audio_track_index}")
+                        continue
+                    
+                    # Update metadata
+                    success = self.update_mkv_language(mkv_path, audio_track_index, language_code, self.config.dry_run)
+                    if success:
+                        results['processed_tracks'].append({
+                            'track_index': audio_track_index,
+                            'detected_language': language_code,
+                            'previous_language': current_language
+                        })
+                    else:
+                        results['failed_tracks'].append(audio_track_index)
+                        results['errors'].append(f"Failed to update track {audio_track_index}")
+                        
+                except Exception as e:
+                    error_msg = f"Error processing track {audio_track_index}: {str(e)}"
+                    logger.error(error_msg)
+                    results['failed_tracks'].append(audio_track_index)
+                    results['errors'].append(error_msg)
+        
+        # Process subtitle tracks (new)
+        if self.config.process_subtitles:
+            print(f"\nProcessing subtitles for: {mkv_path.name}")
+            subtitle_results = self.process_subtitle_tracks(mkv_path)
+            results['subtitle_results'] = subtitle_results
         
         return results
     
@@ -1848,7 +3161,7 @@ def check_for_updates():
                 print(f"Current: {current_version}, Latest: {latest_version}")
                 print("Check: https://github.com/netplexflix/MKV-Undefined-Audio-Language-Detector\n")
             else:
-                print("f✓ Up to date. Version: {VERSION}")
+                print(f"✓ Up to date. Version: {VERSION}")
         
     except requests.exceptions.RequestException as e:
         print("Failed (network error)")
@@ -1988,6 +3301,99 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
                 print(f"{YELLOW}     Original: {failure['original_file']}{RESET}")
                 print(f"{YELLOW}     MKV: {failure['mkv_file']}{RESET}")
     
+    # Add subtitle summary
+    if config.process_subtitles:
+        print(f"\n{'='*60}")
+        print("SUBTITLE PROCESSING SUMMARY")
+        print(f"{'='*60}")
+        
+        total_subtitle_tracks = 0
+        processed_subtitle_tracks = 0
+        failed_subtitle_tracks = 0
+        skipped_subtitle_tracks = 0
+        forced_subtitles_found = 0
+        sdh_subtitles_found = 0
+        
+        for result in results:
+            if result.get('subtitle_results'):
+                sub_results = result['subtitle_results']
+                total_subtitle_tracks += sub_results['subtitle_tracks_found']
+                processed_subtitle_tracks += len(sub_results['processed_subtitle_tracks'])
+                failed_subtitle_tracks += len(sub_results['failed_subtitle_tracks'])
+                skipped_subtitle_tracks += len(sub_results.get('skipped_subtitle_tracks', []))
+                
+                for track in sub_results['processed_subtitle_tracks']:
+                    if track.get('is_forced'):
+                        forced_subtitles_found += 1
+                    if track.get('is_sdh'):
+                        sdh_subtitles_found += 1
+                
+                # Print per-file subtitle details
+                if (sub_results['processed_subtitle_tracks'] or 
+                    sub_results['failed_subtitle_tracks'] or 
+                    sub_results.get('skipped_subtitle_tracks')):
+                    
+                    file_name = Path(result['original_file']).name
+                    print(f"\n{file_name}:")
+                    
+                    # Show processed tracks
+                    for track in sub_results['processed_subtitle_tracks']:
+                        track_idx = track['track_index']
+                        lang = track['detected_language']
+                        prev_lang = track['previous_language']
+                        conf = track['confidence']
+                        
+                        flags = []
+                        if track.get('is_forced'):
+                            flags.append(f"{YELLOW}Forced{RESET}")
+                        if track.get('is_sdh'):
+                            flags.append(f"{CYAN}SDH{RESET}")
+                        
+                        flag_str = f" [{', '.join(flags)}]" if flags else ""
+                        
+                        if prev_lang == lang:
+                            print(f"  subtitle track{track_idx}: {prev_lang} -> {lang} (conf: {conf:.2f}){flag_str}")
+                        else:
+                            print(f"  {CYAN}subtitle track{track_idx}: {prev_lang} -> {lang}{RESET} (conf: {conf:.2f}){flag_str}")
+                    
+                    # Show skipped tracks
+                    if sub_results.get('skipped_subtitle_tracks'):
+                        for track in sub_results['skipped_subtitle_tracks']:
+                            track_idx = track['track_index']
+                            lang = track['detected_language']
+                            conf = track['confidence']
+                            reason = track.get('reason', 'unknown')
+                            
+                            if reason == 'confidence_below_threshold':
+                                reason_text = f"confidence below threshold ({config.subtitle_confidence_threshold})"
+                            else:
+                                reason_text = reason
+                            
+                            print(f"  {YELLOW}subtitle track{track_idx}: skipped{RESET} (detected: {lang}, conf: {conf:.2f}, reason: {reason_text})")
+                    
+                    # Show failed tracks
+                    for track_idx in sub_results['failed_subtitle_tracks']:
+                        print(f"  {RED}subtitle track{track_idx}: failed{RESET}")
+        
+        # Overall subtitle statistics
+        if total_subtitle_tracks > 0:
+            print(f"\nSubtitle tracks found: {total_subtitle_tracks}")
+            print(f"Successfully processed: {processed_subtitle_tracks}")
+            
+            if skipped_subtitle_tracks > 0:
+                print(f"{YELLOW}Skipped (low confidence): {skipped_subtitle_tracks}{RESET}")
+            
+            if failed_subtitle_tracks > 0:
+                print(f"{RED}Failed: {failed_subtitle_tracks}{RESET}")
+            
+            if forced_subtitles_found > 0:
+                print(f"Forced subtitles detected: {forced_subtitles_found}")
+            
+            if sdh_subtitles_found > 0:
+                print(f"SDH subtitles detected: {sdh_subtitles_found}")
+        else:
+            print("\nNo subtitle tracks found to process")
+    
     print(f"\nTotal runtime: {format_duration(runtime_seconds)}")
     
     if config.dry_run:
@@ -1997,7 +3403,7 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
 def main():
     start_time = time.time()
     
-    parser = argparse.ArgumentParser(description='Detect and update language metadata for video file audio tracks')
+    parser = argparse.ArgumentParser(description='Detect and update language metadata for video file audio and subtitle tracks')
     parser.add_argument('--config', default='config/config.yml', 
                        help='Configuration file path (default: config/config.yml)')
     parser.add_argument('--create-config', action='store_true',
@@ -2024,6 +3430,14 @@ def main():
                        help='Override compute type from config')
     parser.add_argument('--reprocess-all', action='store_true',
                        help='Reprocess all audio tracks instead of only undefined ones')
+    parser.add_argument('--process-subtitles', action='store_true',
+                       help='Process subtitle tracks in addition to audio tracks')
+    parser.add_argument('--analyze-forced', action='store_true',
+                       help='Analyze whether subtitle tracks are forced subtitles')
+    parser.add_argument('--no-sdh-detection', action='store_true',
+                       help='Disable SDH subtitle detection')
+    parser.add_argument('--reprocess-all-subtitles', action='store_true',
+                       help='Reprocess all subtitle tracks instead of only undefined ones')
     
     args = parser.parse_args()
     
@@ -2070,7 +3484,7 @@ def main():
     
     # Override config with command line arguments
     if args.directory:
-        config.path = args.directory
+        config.path = [args.directory]
     if args.model:
         config.whisper_model = args.model
     if args.dry_run:
@@ -2083,6 +3497,14 @@ def main():
         config.compute_type = args.compute_type
     if args.reprocess_all:
         config.reprocess_all = True
+    if args.process_subtitles:
+        config.process_subtitles = True
+    if args.analyze_forced:
+        config.analyze_forced_subtitles = True
+    if args.no_sdh_detection:
+        config.detect_sdh_subtitles = False
+    if args.reprocess_all_subtitles:
+        config.reprocess_all_subtitles = True
     
     # Set final logging level based on configuration (after loading config)
     if config.show_details:
@@ -2137,6 +3559,15 @@ def main():
         logger.error("pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
         sys.exit(1)
     
+    # Check for optional langdetect library (for subtitle processing)
+    if config.process_subtitles:
+        try:
+            import langdetect
+        except ImportError:
+            logger.warning("langdetect library not installed (optional for subtitle language detection)")
+            logger.warning("Install with: pip install langdetect")
+            logger.warning("Subtitle language detection will use fallback method")
+    
     # Initialize detector
     try:
         if config.show_details:
@@ -2161,9 +3592,9 @@ def main():
     
     # Process directory
     if config.show_details:
-        logger.info(f"Scanning directory: {config.path}")
+        logger.info(f"Scanning directories: {config.path}")
     else:
-        print(f"Scanning directory: {config.path}")
+        print(f"Scanning directories: {config.path}")
         
     if config.dry_run:
         print("DRY RUN MODE - No files will be modified")
