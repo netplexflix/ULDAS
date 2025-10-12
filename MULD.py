@@ -17,8 +17,10 @@ import requests
 from packaging import version
 import psutil
 import re
+import signal
+from contextlib import contextmanager
 
-VERSION = '2025.10.11'
+VERSION = '2025.10.12'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -72,6 +74,10 @@ class Config:
         self.detect_sdh_subtitles = True
         self.subtitle_confidence_threshold = 0.85
         self.reprocess_all_subtitles = False
+
+        self.operation_timeout_seconds = 600  # 10 minutes default
+        self.forced_subtitle_low_coverage_threshold = 20.0  # Below this % = likely forced
+        self.forced_subtitle_high_coverage_threshold = 60.0  # Above this % = likely NOT forced
         
     def load_from_file(self, config_path: str = "config/config.yml"):
         config_dir = os.path.dirname(config_path)
@@ -107,8 +113,12 @@ class Config:
                 self.detect_sdh_subtitles = config_data.get('detect_sdh_subtitles', self.detect_sdh_subtitles)
                 self.subtitle_confidence_threshold = config_data.get('subtitle_confidence_threshold', self.subtitle_confidence_threshold)
                 self.reprocess_all_subtitles = config_data.get('reprocess_all_subtitles', self.reprocess_all_subtitles)
-                
-            logger.info(f"Configuration loaded from {config_path}")
+
+                # Load timeout and threshold settings
+                self.operation_timeout_seconds = config_data.get('operation_timeout_seconds', self.operation_timeout_seconds)
+                self.forced_subtitle_low_coverage_threshold = config_data.get('forced_subtitle_low_coverage_threshold', self.forced_subtitle_low_coverage_threshold)
+                self.forced_subtitle_high_coverage_threshold = config_data.get('forced_subtitle_high_coverage_threshold', self.forced_subtitle_high_coverage_threshold)
+                logger.info(f"Configuration loaded from {config_path}")
             
         except Exception as e:
             logger.error(f"Error loading config file {config_path}: {e}")
@@ -136,7 +146,10 @@ class Config:
             'analyze_forced_subtitles': True,
             'detect_sdh_subtitles': True,
             'subtitle_confidence_threshold': 0.85,
-            'reprocess_all_subtitles': False
+            'reprocess_all_subtitles': False,
+            'operation_timeout_seconds': 600,  # 10 minutes
+            'forced_subtitle_low_coverage_threshold': 20.0,  # Below 20% = likely forced
+            'forced_subtitle_high_coverage_threshold': 60.0  # Above 60% = likely NOT forced
         }
         
         try:
@@ -150,6 +163,34 @@ class Config:
             print("Edit this file to customize your settings")
         except Exception as e:
             logger.error(f"Error creating config file: {e}")
+
+class TimeoutException(Exception):
+    pass
+
+@contextmanager
+def timeout_handler(seconds, operation_name="Operation"):
+    """Context manager for timeout handling."""
+    def timeout_signal_handler(signum, frame):
+        raise TimeoutException(f"{operation_name} timed out after {seconds} seconds")
+    
+    # Set up signal handler (Unix-like systems)
+    if hasattr(signal, 'SIGALRM'):
+        old_handler = signal.signal(signal.SIGALRM, timeout_signal_handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Windows fallback - use threading
+        import threading
+        timer = threading.Timer(seconds, lambda: None)
+        timer.start()
+        try:
+            yield
+        finally:
+            timer.cancel()
 
 def find_executable(name: str) -> Optional[str]:
     if shutil.which(name):
@@ -1425,12 +1466,20 @@ class MKVLanguageDetector:
                     limited_cmd = limit_subprocess_resources(cmd)
                     
                     if self.config.show_details:
-                        logger.info(f"Extracting full audio track {audio_track_index}")
+                        logger.info(f"Extracting full audio track {audio_track_index} (timeout: {self.config.operation_timeout_seconds}s)")
                     
-                    result = subprocess.run(limited_cmd, check=True, capture_output=True, 
-                                          text=True, encoding='utf-8', errors='replace')
+                    # Add timeout to subprocess
+                    result = subprocess.run(
+                        limited_cmd, 
+                        check=True, 
+                        capture_output=True,
+                        text=True, 
+                        encoding='utf-8', 
+                        errors='replace',
+                        timeout=self.config.operation_timeout_seconds
+                    )
                     
-                    if temp_path.exists() and temp_path.stat().st_size > 10000:  # At least 10KB
+                    if temp_path.exists() and temp_path.stat().st_size > 10000:
                         if self.config.show_details:
                             logger.info(f"Successfully extracted full audio track {audio_track_index}")
                         return temp_path
@@ -1438,6 +1487,11 @@ class MKVLanguageDetector:
                     if temp_path.exists():
                         temp_path.unlink()
                         
+                except subprocess.TimeoutExpired:
+                    logger.error(f"Full audio extraction timed out after {self.config.operation_timeout_seconds} seconds")
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    return None
                 except subprocess.CalledProcessError as e:
                     if temp_path.exists():
                         temp_path.unlink()
@@ -2090,14 +2144,7 @@ class MKVLanguageDetector:
                                audio_track_index: int = 0, subtitle_path: Path = None) -> bool:
         """
         Detect if subtitle track is forced (only shows for foreign language parts).
-        Compares subtitle timing coverage against actual speech timing from audio.
-        
-        Args:
-            file_path: Path to the video file
-            subtitle_track_index: Index of the subtitle track
-            stream_index: Stream index in the file
-            audio_track_index: Index of audio track to analyze (default: 0)
-            subtitle_path: Optional pre-extracted subtitle path (avoids re-extraction)
+        Uses coverage thresholds to avoid expensive audio analysis when possible.
         """
         try:
             # Extract or use provided subtitle track
@@ -2156,53 +2203,78 @@ class MKVLanguageDetector:
                     logger.info(f"Subtitle coverage: {subtitle_coverage:.1f}% of total duration")
                     logger.info(f"Subtitle count: {len(subtitles)} ({subtitle_density:.1f} per minute)")
                 
-                # Quick heuristics first
-                if subtitle_coverage < 15:
+                # NEW: Use configurable thresholds to avoid expensive audio analysis
+                low_threshold = self.config.forced_subtitle_low_coverage_threshold
+                high_threshold = self.config.forced_subtitle_high_coverage_threshold
+                
+                # If coverage is below low threshold, assume forced without further analysis
+                if subtitle_coverage < low_threshold:
                     if self.config.show_details:
-                        logger.info("Very low coverage (<15%) - likely forced subtitles")
+                        logger.info(f"Coverage ({subtitle_coverage:.1f}%) below threshold ({low_threshold}%) - assuming forced subtitles")
                     return True
                 
-                if subtitle_density < 3:
+                # If coverage is above high threshold, assume NOT forced without further analysis
+                if subtitle_coverage > high_threshold:
                     if self.config.show_details:
-                        logger.info("Very low density (<3/min) - likely forced subtitles")
-                    return True
-                
-                if subtitle_coverage > 60:
-                    if self.config.show_details:
-                        logger.info("High coverage (>60%) - not forced subtitles")
+                        logger.info(f"Coverage ({subtitle_coverage:.1f}%) above threshold ({high_threshold}%) - assuming NOT forced subtitles")
                     return False
                 
-                # For borderline cases, analyze audio
-                if self.config.show_details:
-                    logger.info("Borderline coverage - analyzing audio for speech patterns...")
-                
-                # Extract FULL audio track for accurate analysis
-                audio_path = self.extract_full_audio_track(file_path, audio_track_index, stream_index)
-                if not audio_path:
+                # For borderline cases (between thresholds), analyze audio if enabled
+                if not self.config.analyze_forced_subtitles:
+                    # If audio analysis is disabled, use conservative estimate
+                    is_forced = subtitle_coverage < ((low_threshold + high_threshold) / 2)
                     if self.config.show_details:
-                        logger.warning("Could not extract audio, using subtitle-only heuristics")
-                    is_forced = subtitle_coverage < 25 or subtitle_density < 5
+                        logger.info(f"Borderline coverage without audio analysis - using midpoint heuristic: {is_forced}")
+                    return is_forced
+                
+                if self.config.show_details:
+                    logger.info(f"Borderline coverage ({subtitle_coverage:.1f}%) - analyzing audio for speech patterns...")
+                
+                # Extract FULL audio track for accurate analysis (with timeout protection)
+                try:
+                    audio_path = self.extract_full_audio_track(file_path, audio_track_index, stream_index)
+                    if not audio_path:
+                        if self.config.show_details:
+                            logger.warning("Could not extract audio, using subtitle-only heuristics")
+                        is_forced = subtitle_coverage < 30 or subtitle_density < 5
+                        return is_forced
+                except TimeoutException as e:
+                    logger.error(f"Audio extraction timed out: {e}")
+                    logger.warning("Using subtitle-only heuristics due to timeout")
+                    is_forced = subtitle_coverage < 30 or subtitle_density < 5
                     return is_forced
                 
                 try:
-                    # Use Whisper to detect speech segments with VAD
+                    # Use Whisper to detect speech segments with VAD (with timeout)
                     if self.config.show_details:
                         logger.info("Running speech detection on full audio track...")
                     
-                    segments, info = self.whisper_model.transcribe(
-                        str(audio_path),
-                        language=None,
-                        task="transcribe",
-                        beam_size=1,
-                        best_of=1,
-                        temperature=0.0,
-                        vad_filter=True,
-                        vad_parameters={
-                            "min_speech_duration_ms": 250,
-                            "max_speech_duration_s": 30
-                        },
-                        word_timestamps=True
-                    )
+                    # Wrap transcription in timeout
+                    try:
+                        segments, info = self.whisper_model.transcribe(
+                            str(audio_path),
+                            language=None,
+                            task="transcribe",
+                            beam_size=1,
+                            best_of=1,
+                            temperature=0.0,
+                            vad_filter=True,
+                            vad_parameters={
+                                "min_speech_duration_ms": 250,
+                                "max_speech_duration_s": 30
+                            },
+                            word_timestamps=True
+                        )
+                    except Exception as e:
+                        logger.error(f"Speech detection failed or timed out: {e}")
+                        if audio_path and audio_path.exists():
+                            audio_path.unlink()
+                        # Fallback to heuristics
+                        is_forced = subtitle_coverage < 30 or subtitle_density < 5
+                        return is_forced
+                    
+                    if self.config.show_details:
+                        logger.info(f"Transcription completed, processing results...")
                     
                     # Collect speech timings
                     speech_timings = []
@@ -2248,7 +2320,7 @@ class MKVLanguageDetector:
                         if self.config.show_details:
                             logger.info(f"Subtitle coverage much less than speech ({coverage_ratio:.2f}) - likely forced")
                     
-                    if subtitle_coverage < 20 and subtitle_density < 5:
+                    if subtitle_coverage < 25 and subtitle_density < 5:
                         is_forced = True
                         if self.config.show_details:
                             logger.info("Low coverage and density - likely forced")
@@ -2269,6 +2341,10 @@ class MKVLanguageDetector:
                 if should_cleanup and subtitle_path and subtitle_path.exists():
                     subtitle_path.unlink()
             
+        except TimeoutException as e:
+            logger.error(f"Forced subtitle detection timed out: {e}")
+            logger.warning("Skipping forced subtitle detection for this track")
+            return False
         except Exception as e:
             logger.error(f"Error detecting forced subtitles: {e}")
             if self.config.show_details:

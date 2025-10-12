@@ -77,6 +77,9 @@ Only Change these if you know what you're doing.
 - **subtitle_confidence_threshold**: If subtitle detection confidence falls below confidence, the track is skipped
 - **reprocess_all** : When set to `true` the script will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
 - **reprocess_all_subtitles**: When set to `true` the script will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
+- **operation_timeout_seconds**: 600,  # 10 minutes
+- **forced_subtitle_low_coverage_threshold**: 20.0,  # Below 20% = likely forced
+- **forced_subtitle_high_coverage_threshold**: 60.0,  # Above 60% = likely NOT forced
 
 ### Model Size Guide
 
