@@ -1,4 +1,4 @@
-# 🎬 MKV Undefined Language Detector (MULD) 🗣️
+# 🎬 Undefined Language Detector for Audio and Subtitles (ULDAS) 🗣️
 
 Ever downloaded a movie or TV show only to find the audio and/or subtitle tracks are labeled as "undefined" or "unknown" in your media player?</br>
 This script solves that problem by:
@@ -37,7 +37,7 @@ cd MKV-Undefined-Audio-Language-Detector
 - Open a Terminal in the script's directory
 >[!TIP]
 >Windows Users: <br/>
->Go to the script folder (where MULD.py is).</br>
+>Go to the script folder (where ULDAS.py is).</br>
 >Right mouse click on an empty space in the folder and click `Open in Windows Terminal`
 - Install the required dependencies:
 ```sh
@@ -62,7 +62,7 @@ Rename `config.example.yml` to `config.yml` and change the values where needed:
 > [!TIP]
 >You can create a config file with a few expert variables by using the following command:
 >```sh
->python MUALD.py --create-config
+>python ULDAS.py --create-config
 >```
 
 Only Change these if you know what you're doing.
@@ -78,8 +78,19 @@ Only Change these if you know what you're doing.
 - **reprocess_all** : When set to `true` the script will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
 - **reprocess_all_subtitles**: When set to `true` the script will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
 - **operation_timeout_seconds**: 600,  # 10 minutes
-- **forced_subtitle_low_coverage_threshold**: 20.0,  # Below 20% = likely forced
-- **forced_subtitle_high_coverage_threshold**: 60.0,  # Above 60% = likely NOT forced
+
+Forced subtitle detection thresholds.<br>
+Density-based:
+- **forced_subtitle_low_density_threshold**: Below = likely forced
+- **forced_subtitle_high_density_threshold**: Above = likely full
+
+Coverage-based (secondary factor):
+- **forced_subtitle_low_coverage_threshold**: Below = likely forced
+- **forced_subtitle_high_coverage_threshold**: Above = likely full
+
+Absolute count thresholds:
+- **forced_subtitle_min_count_threshold**: Below = likely forced
+- **forced_subtitle_max_count_threshold**: Above = likely full
 
 ### Model Size Guide
 
@@ -95,13 +106,13 @@ Only Change these if you know what you're doing.
 
 Run the script with:
 ```sh
-python MUALD.py
+python ULDAS.py
 ```
 
 > [!TIP]
 > Windows users can create a batch file for quick launching:
 > ```batch
-> "C:\Path\To\Python\python.exe" "Path\To\Script\MUALD.py"
+> "C:\Path\To\Python\python.exe" "Path\To\Script\ULDAS.py"
 > pause
 > ```
 
