@@ -17,10 +17,8 @@ import requests
 from packaging import version
 import psutil
 import re
-import signal
-from contextlib import contextmanager
 
-VERSION = '2025.10.1202'
+VERSION = '2025.10.13'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -67,6 +65,8 @@ class Config:
         self.cpu_threads = 0
         self.confidence_threshold = 0.9
         self.reprocess_all = False
+        self.use_tracking = True
+        self.force_reprocess = False
         
         # Subtitle processing options
         self.process_subtitles = False
@@ -194,34 +194,6 @@ class Config:
         except Exception as e:
             logger.error(f"Error creating config file: {e}")
 
-class TimeoutException(Exception):
-    pass
-
-@contextmanager
-def timeout_handler(seconds, operation_name="Operation"):
-    """Context manager for timeout handling."""
-    def timeout_signal_handler(signum, frame):
-        raise TimeoutException(f"{operation_name} timed out after {seconds} seconds")
-    
-    # Set up signal handler (Unix-like systems)
-    if hasattr(signal, 'SIGALRM'):
-        old_handler = signal.signal(signal.SIGALRM, timeout_signal_handler)
-        signal.alarm(seconds)
-        try:
-            yield
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-    else:
-        # Windows fallback - use threading
-        import threading
-        timer = threading.Timer(seconds, lambda: None)
-        timer.start()
-        try:
-            yield
-        finally:
-            timer.cancel()
-
 def find_executable(name: str) -> Optional[str]:
     if shutil.which(name):
         return name
@@ -341,11 +313,120 @@ def find_mkvtoolnix_installation():
     
     return None
 
+class ProcessingTracker:
+    """Tracks successfully processed files to avoid reprocessing."""
+    
+    def __init__(self, config_dir: str = "config"):
+        self.config_dir = Path(config_dir)
+        self.config_dir.mkdir(exist_ok=True)
+        self.tracker_file = self.config_dir / "processed_files.json"
+        self.data = self._load()
+    
+    def _load(self) -> Dict:
+        """Load tracking data from file."""
+        if self.tracker_file.exists():
+            try:
+                with open(self.tracker_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Could not load tracking file: {e}. Starting fresh.")
+                return {}
+        return {}
+    
+    def _save(self):
+        """Save tracking data to file."""
+        try:
+            with open(self.tracker_file, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, indent=2)
+        except IOError as e:
+            logger.error(f"Could not save tracking file: {e}")
+    
+    def is_processed(self, file_path: Path) -> bool:
+        """Check if file has been successfully processed."""
+        key = str(file_path.absolute())
+        
+        if key not in self.data:
+            return False
+        
+        entry = self.data[key]
+        
+        # Verify file still exists and hasn't changed
+        if not file_path.exists():
+            # File was deleted, remove from tracking
+            del self.data[key]
+            self._save()
+            return False
+        
+        stat = file_path.stat()
+        current_size = stat.st_size
+        current_mtime = stat.st_mtime
+        
+        # Check if size or modification time changed
+        if (entry['size'] != current_size or 
+            abs(entry['mtime'] - current_mtime) > 1):  # 1 second tolerance for filesystem quirks
+            # File changed, remove from tracking
+            del self.data[key]
+            self._save()
+            return False
+        
+        return True
+    
+    def mark_processed(self, file_path: Path, audio_success: bool = False, 
+                      subtitle_success: bool = False):
+        """Mark file as successfully processed."""
+        # Only mark if at least one type was successfully processed
+        if not (audio_success or subtitle_success):
+            return
+        
+        key = str(file_path.absolute())
+        stat = file_path.stat()
+        
+        self.data[key] = {
+            'size': stat.st_size,
+            'mtime': stat.st_mtime,
+            'audio_processed': audio_success,
+            'subtitle_processed': subtitle_success,
+            'processed_date': time.time()
+        }
+        self._save()
+    
+    def clear_entry(self, file_path: Path):
+        """Remove a file from tracking (for force reprocessing)."""
+        key = str(file_path.absolute())
+        if key in self.data:
+            del self.data[key]
+            self._save()
+    
+    def clear_all(self):
+        """Clear all tracking data."""
+        self.data = {}
+        self._save()
+    
+    def get_stats(self) -> Dict:
+        """Get statistics about tracked files."""
+        total = len(self.data)
+        audio_only = sum(1 for e in self.data.values() if e['audio_processed'] and not e['subtitle_processed'])
+        subtitle_only = sum(1 for e in self.data.values() if e['subtitle_processed'] and not e['audio_processed'])
+        both = sum(1 for e in self.data.values() if e['audio_processed'] and e['subtitle_processed'])
+        
+        return {
+            'total_tracked': total,
+            'audio_only': audio_only,
+            'subtitle_only': subtitle_only,
+            'both': both
+        }
+
 class MKVLanguageDetector:
     def __init__(self, config: Config):
         setup_cpu_limits()
         
         self.config = config
+        
+        # Initialize tracking
+        if config.use_tracking:
+            self.tracker = ProcessingTracker("config")
+            if config.force_reprocess:
+                logger.info("Force reprocess enabled - ignoring tracking cache")
         
         # Determine device and compute type
         device = self._determine_device()
@@ -3271,8 +3352,43 @@ class MKVLanguageDetector:
             'processed_tracks': [],
             'failed_tracks': [],
             'errors': [],
-            'subtitle_results': None
+            'subtitle_results': None,
+            'skipped_due_to_tracking': False
         }
+        
+        # Check if file should be skipped due to tracking
+        # If reprocess_all or reprocess_all_subtitles is enabled, tracking is bypassed
+        should_skip_audio = False
+        should_skip_subtitles = False
+        
+        if self.config.use_tracking and hasattr(self, 'tracker'):
+            # Tracking is bypassed if reprocess_all or reprocess_all_subtitles is enabled
+            bypass_tracking = self.config.reprocess_all or self.config.reprocess_all_subtitles
+            
+            if not bypass_tracking and self.tracker.is_processed(file_path):
+                entry_key = str(file_path.absolute())
+                entry = self.tracker.data.get(entry_key, {})
+                
+                # Check what was previously processed
+                audio_was_processed = entry.get('audio_processed', False)
+                subtitle_was_processed = entry.get('subtitle_processed', False)
+                
+                # Skip audio if it was processed (reprocess_all would have bypassed this check)
+                if audio_was_processed:
+                    should_skip_audio = True
+                
+                # Skip subtitles if they were processed (reprocess_all_subtitles would have bypassed this check)
+                if subtitle_was_processed:
+                    should_skip_subtitles = True
+                
+                # If both should be skipped, skip the entire file
+                if should_skip_audio and (should_skip_subtitles or not self.config.process_subtitles):
+                    if self.config.show_details:
+                        logger.info(f"Skipping {file_path.name} (already processed)")
+                    else:
+                        print(f"Skipping {file_path.name} (already processed)")
+                    results['skipped_due_to_tracking'] = True
+                    return results
         
         print(f"Processing: {file_path.name}")
         
@@ -3289,64 +3405,93 @@ class MKVLanguageDetector:
         
         results['mkv_file'] = str(mkv_path)
         
-        # Find audio tracks based on config
-        if self.config.reprocess_all:
-            audio_tracks = self.find_all_audio_tracks(mkv_path)
-            track_type = "all audio"
-        else:
-            # For undefined tracks, also get current language for consistency
-            undefined_tracks = self.find_undefined_audio_tracks(mkv_path)
-            # Convert to format with current language
-            audio_tracks = []
-            for audio_track_index, stream_info, stream_index in undefined_tracks:
-                audio_tracks.append((audio_track_index, stream_info, stream_index, 'und'))
-            track_type = "undefined audio"
+        # Track success for each processing type
+        audio_success = False
+        subtitle_success = False
         
-        results['undefined_tracks'] = len(audio_tracks)  # Keep this name for compatibility
-        
-        if not audio_tracks:
-            if self.config.show_details:
-                logger.info(f"No {track_type} tracks found in {mkv_path.name}")
-        else:
-            # Process each track
-            for track_data in audio_tracks:
-                if len(track_data) == 4:
-                    audio_track_index, stream_info, stream_index, current_language = track_data
-                else:
-                    audio_track_index, stream_info, stream_index = track_data
-                    current_language = 'und'
-                    
-                try:
-                    # Detect language with retries
-                    language_code = self.detect_language_with_retries(mkv_path, audio_track_index, stream_index, max_retries=3)
-                    if not language_code:
-                        results['failed_tracks'].append(audio_track_index)
-                        results['errors'].append(f"Failed to detect language for track {audio_track_index}")
-                        continue
-                    
-                    # Update metadata
-                    success = self.update_mkv_language(mkv_path, audio_track_index, language_code, self.config.dry_run)
-                    if success:
-                        results['processed_tracks'].append({
-                            'track_index': audio_track_index,
-                            'detected_language': language_code,
-                            'previous_language': current_language
-                        })
+        # Process audio tracks (unless skipped by tracking)
+        if not should_skip_audio:
+            # Find audio tracks based on config
+            if self.config.reprocess_all:
+                audio_tracks = self.find_all_audio_tracks(mkv_path)
+                track_type = "all audio"
+            else:
+                undefined_tracks = self.find_undefined_audio_tracks(mkv_path)
+                audio_tracks = []
+                for audio_track_index, stream_info, stream_index in undefined_tracks:
+                    audio_tracks.append((audio_track_index, stream_info, stream_index, 'und'))
+                track_type = "undefined audio"
+            
+            results['undefined_tracks'] = len(audio_tracks)
+            
+            if not audio_tracks:
+                if self.config.show_details:
+                    logger.info(f"No {track_type} tracks found in {mkv_path.name}")
+                # No undefined tracks = success
+                audio_success = True
+            else:
+                # Process each track
+                audio_had_failures = False
+                for track_data in audio_tracks:
+                    if len(track_data) == 4:
+                        audio_track_index, stream_info, stream_index, current_language = track_data
                     else:
-                        results['failed_tracks'].append(audio_track_index)
-                        results['errors'].append(f"Failed to update track {audio_track_index}")
+                        audio_track_index, stream_info, stream_index = track_data
+                        current_language = 'und'
                         
-                except Exception as e:
-                    error_msg = f"Error processing track {audio_track_index}: {str(e)}"
-                    logger.error(error_msg)
-                    results['failed_tracks'].append(audio_track_index)
-                    results['errors'].append(error_msg)
+                    try:
+                        language_code = self.detect_language_with_retries(mkv_path, audio_track_index, stream_index, max_retries=3)
+                        if not language_code:
+                            results['failed_tracks'].append(audio_track_index)
+                            results['errors'].append(f"Failed to detect language for track {audio_track_index}")
+                            audio_had_failures = True
+                            continue
+                        
+                        success = self.update_mkv_language(mkv_path, audio_track_index, language_code, self.config.dry_run)
+                        if success:
+                            results['processed_tracks'].append({
+                                'track_index': audio_track_index,
+                                'detected_language': language_code,
+                                'previous_language': current_language
+                            })
+                        else:
+                            results['failed_tracks'].append(audio_track_index)
+                            results['errors'].append(f"Failed to update track {audio_track_index}")
+                            audio_had_failures = True
+                            
+                    except Exception as e:
+                        error_msg = f"Error processing track {audio_track_index}: {str(e)}"
+                        logger.error(error_msg)
+                        results['failed_tracks'].append(audio_track_index)
+                        results['errors'].append(error_msg)
+                        audio_had_failures = True
+                
+                # Audio processing successful if we had tracks and no failures
+                audio_success = not audio_had_failures
+        else:
+            # Skipped audio due to tracking
+            audio_success = True  # Consider it successful since it was previously processed
         
-        # Process subtitle tracks (new)
-        if self.config.process_subtitles:
+        # Process subtitle tracks (unless skipped by tracking)
+        if self.config.process_subtitles and not should_skip_subtitles:
             print(f"\nProcessing subtitles for: {mkv_path.name}")
             subtitle_results = self.process_subtitle_tracks(mkv_path)
             results['subtitle_results'] = subtitle_results
+            
+            # Subtitle processing successful if no failures
+            subtitle_success = (
+                len(subtitle_results.get('failed_subtitle_tracks', [])) == 0 and
+                len(subtitle_results.get('subtitle_errors', [])) == 0
+            )
+        elif should_skip_subtitles:
+            # Skipped subtitles due to tracking
+            subtitle_success = True  # Consider it successful since it was previously processed
+        
+        # Mark as processed if successful and not dry run
+        if (self.config.use_tracking and 
+            hasattr(self, 'tracker') and 
+            not self.config.dry_run):
+            self.tracker.mark_processed(mkv_path, audio_success, subtitle_success)
         
         return results
     
@@ -3425,7 +3570,8 @@ def format_duration(seconds):
     seconds = int(seconds % 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds: float, detector: MKVLanguageDetector = None):
+def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds: float, 
+                          detector: MKVLanguageDetector = None):
     print(f"\n{'='*60}")
     print("PROCESSING SUMMARY")
     print(f"{'='*60}")
@@ -3435,6 +3581,7 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
     files_successfully_processed = 0
     files_with_failures = 0
     files_processed = 0
+    files_skipped = 0
     silent_content_files = []
     
     # ANSI color codes
@@ -3445,6 +3592,10 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
     RESET = '\033[0m'
     
     for result in results:
+        if result.get('skipped_due_to_tracking'):
+            files_skipped += 1
+            continue
+            
         file_name = Path(result['original_file']).name
         actions = []
         has_silent_content = False
@@ -3467,16 +3618,13 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
             lang_code = track['detected_language']
             prev_lang = track.get('previous_language', 'und')
             
-            # Format the track action based on whether language changed
             if prev_lang == lang_code:
-                # No change - show in normal color
                 if lang_code == 'zxx':
                     track_actions.append(f"{YELLOW}track{track_idx}: {prev_lang} -> {lang_code} (no speech){RESET}")
                     has_silent_content = True
                 else:
                     track_actions.append(f"track{track_idx}: {prev_lang} -> {lang_code}")
             else:
-                # Language changed - show in color
                 if lang_code == 'zxx':
                     track_actions.append(f"{YELLOW}track{track_idx}: {prev_lang} -> {lang_code} (no speech){RESET}")
                     has_silent_content = True
@@ -3510,6 +3658,10 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
             else:
                 files_successfully_processed += 1
     
+    # Show summary
+    if files_skipped > 0:
+        print(f"\n{GREEN}Skipped {files_skipped} already-processed file(s){RESET}")
+    
     if files_with_actions > 0:
         print(f"\nShowing {files_with_actions} files that required action (out of {total_files} total files)")
         
@@ -3523,6 +3675,19 @@ def print_detailed_summary(results: List[Dict], config: Config, runtime_seconds:
             print(". ".join(status_parts))
     else:
         print("No files required any action")
+    
+    # Show tracking statistics
+    if config.use_tracking and detector and hasattr(detector, 'tracker'):
+        stats = detector.tracker.get_stats()
+        if stats['total_tracked'] > 0:
+            print(f"\n{CYAN}Tracking Statistics:{RESET}")
+            print(f"  Total files tracked: {stats['total_tracked']}")
+            if stats['audio_only'] > 0:
+                print(f"  Audio-only processed: {stats['audio_only']}")
+            if stats['subtitle_only'] > 0:
+                print(f"  Subtitle-only processed: {stats['subtitle_only']}")
+            if stats['both'] > 0:
+                print(f"  Both audio & subtitles: {stats['both']}")
     
     # Special warning for silent content
     if silent_content_files:
@@ -3685,8 +3850,22 @@ def main():
                        help='Disable SDH subtitle detection')
     parser.add_argument('--reprocess-all-subtitles', action='store_true',
                        help='Reprocess all subtitle tracks instead of only undefined ones')
+    parser.add_argument('--force-reprocess', action='store_true',
+                       help='Force reprocess all files, ignoring tracking cache')
+    parser.add_argument('--clear-tracking', action='store_true',
+                       help='Clear all tracking data and exit')
+    parser.add_argument('--no-tracking', action='store_true',
+                       help='Disable tracking feature for this run')
     
     args = parser.parse_args()
+    
+    # Handle tracking clear
+    if args.clear_tracking:
+        tracker = ProcessingTracker("config")
+        stats = tracker.get_stats()
+        tracker.clear_all()
+        print(f"Cleared tracking data for {stats['total_tracked']} files")
+        return
     
     # Handle config file creation
     if args.create_config:
@@ -3752,6 +3931,10 @@ def main():
         config.detect_sdh_subtitles = False
     if args.reprocess_all_subtitles:
         config.reprocess_all_subtitles = True
+    if args.force_reprocess:
+        config.force_reprocess = True
+    if args.no_tracking:
+        config.use_tracking = False
     
     # Set final logging level based on configuration (after loading config)
     if config.show_details:
