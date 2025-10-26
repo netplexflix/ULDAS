@@ -18,7 +18,7 @@ from packaging import version
 import psutil
 import re
 
-VERSION = '2025.10.13'
+VERSION = '2025.10.26'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -3520,7 +3520,7 @@ def check_for_updates():
     try:
         print("Checking for updates...", end=" ", flush=True)
         
-        api_url = "https://api.github.com/repos/netplexflix/MKV-Undefined-Audio-Language-Detector/releases/latest"
+        api_url = "https://api.github.com/repos/netplexflix/ULDAS/releases/latest"
         
         response = requests.get(api_url, timeout=5)
         response.raise_for_status()
@@ -3542,7 +3542,7 @@ def check_for_updates():
                 print(f"{'='*60}")
                 print(f"Current version: {current_version}")
                 print(f"Latest version:  {latest_version}")
-                print("Download from: https://github.com/netplexflix/MKV-Undefined-Audio-Language-Detector")
+                print("Download from: https://github.com/netplexflix/ULDAS")
                 print(f"{'='*60}\n")
             else:
                 print(f"✓ Up to date. Version: {VERSION}")
@@ -3551,7 +3551,7 @@ def check_for_updates():
             if latest_version != current_version:
                 print("Update may be available")
                 print(f"Current: {current_version}, Latest: {latest_version}")
-                print("Check: https://github.com/netplexflix/MKV-Undefined-Audio-Language-Detector\n")
+                print("Check: https://github.com/netplexflix/ULDAS\n")
             else:
                 print(f"✓ Up to date. Version: {VERSION}")
         

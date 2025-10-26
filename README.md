@@ -1,11 +1,11 @@
-# 🎬 Undefined Language Detector for Audio and Subtitles (ULDAS) 🗣️
+<img width="668" height="201" alt="Image" src="https://github.com/user-attachments/assets/d6d715f7-59cb-4321-ad29-97d04dbd2de5" /> <br>
 
-Ever downloaded a movie or TV show only to find the audio and/or subtitle tracks are labeled as "undefined" or "unknown" in your media player?</br>
-This script solves that problem by:
+Do you have Movies or TV shows in your media player for which the audio and/or subtitle tracks are labeled as "undefined" or "unknown"?</br>
+ULDAS (Undefined Language Detector for Audio and Subtitles) solves that problem by:
 
 1. Scanning your video files for audio and subtitle tracks with undefined language
 2. Extracting audio and subtitle samples
-3. Using AI speech recognition to detect the audio language [(Faster-Whisper)](https://github.com/SYSTRAN/faster-whisper)
+3. Using AI speech recognition to detect the audio language
 4. Detecting subtitle language (can also detect if subtitles are [FORCED] and/or [SDH])
 5. Updating the file metadata with the correct language codes and flags
 
@@ -26,8 +26,8 @@ Requires
 ### 1️⃣ Download the script
 Clone the repository:
 ```sh
-git clone https://github.com/netplexflix/MKV-Undefined-Audio-Language-Detector.git
-cd MKV-Undefined-Audio-Language-Detector
+git clone https://github.com/netplexflix/ULDAS.git
+cd ULDAS
 ```
 
 ![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Or simply download by pressing the green 'Code' button above and then 'Download Zip'.
@@ -75,8 +75,8 @@ Only Change these if you know what you're doing.
 - **cpu_threads**:Number of CPU threads to use. 0 = automatic detection based on system cores (Default: 0)
 - **confidence_threshold**: Minimum confidence level (0.0-1.0) required to accept language detection from audio samples. If sample-based detection falls below this threshold, the entire audio track is analyzed for improved accuracy. Higher values are more conservative but reduce false positives. (Default: 0.9)
 - **subtitle_confidence_threshold**: If subtitle detection confidence falls below confidence, the track is skipped
-- **reprocess_all** : When set to `true` the script will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
-- **reprocess_all_subtitles**: When set to `true` the script will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
+- **reprocess_all** : `true` will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
+- **reprocess_all_subtitles**: `true` will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
 - **operation_timeout_seconds**: 600,  # 10 minutes
 
 Forced subtitle detection thresholds.<br>
