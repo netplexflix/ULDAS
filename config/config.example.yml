@@ -3,5 +3,7 @@ path:
   - P:/TV
 remux_to_mkv: true
 show_details: false
-whisper_model: small
 dry_run: false
+process_subtitles: true
+analyze_forced_subtitles: true
+detect_sdh_subtitles true

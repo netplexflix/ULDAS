@@ -2,9 +2,13 @@ faster-whisper>=1.2.0
 PyYAML>=6.0.2
 requests>=2.32.4
 packaging>=21.3
-torch>=2.7.0
+torch>=2.8.0
 psutil>=7.0.0
+langdetect>=1.0.8
+pytesseract>=0.3.13
+pillow>=11.3.0
 
 # Note: External tools required (install separately):
 # - FFmpeg: https://ffmpeg.org/download.html
 # - MKVToolNix: https://mkvtoolnix.download/downloads.html
+# - Tesseract-OCR: https://tesseract-ocr.github.io/tessdoc/Installation.html
