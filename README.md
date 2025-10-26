@@ -11,7 +11,7 @@ ULDAS (Undefined Language Detector for Audio and Subtitles) solves that problem 
 
 The script optionally remuxes non MKV video formats to MKV first.
 
-![Image](https://github.com/user-attachments/assets/28793dbe-8897-46ae-87f1-4a27f7be4cfb)
+<img width="628" height="58" alt="Image" src="https://github.com/user-attachments/assets/7ab5be74-4702-4488-8958-bf8ef1319e8a" />
 
 Requires 
 - [Python >=3.11](https://www.python.org/downloads/)
