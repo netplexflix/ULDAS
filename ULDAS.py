@@ -435,23 +435,125 @@ class MKVLanguageDetector:
         
         if config.show_details:
             logger.info(f"Initializing faster-whisper with device: {device}, compute_type: {compute_type}")
+            logger.info(f"Model parameter: {config.whisper_model}")
+            logger.info(f"CPU threads: {cpu_threads}")
+            
+            # Check if it's a path
+            is_path = os.path.exists(config.whisper_model) or os.path.isabs(config.whisper_model)
+            logger.info(f"Is path: {is_path}")
+            
+            if is_path:
+                if os.path.exists(config.whisper_model):
+                    logger.info(f"Path exists: {config.whisper_model}")
+                    if os.path.isdir(config.whisper_model):
+                        logger.info(f"Path is directory")
+                        # List contents
+                        try:
+                            contents = os.listdir(config.whisper_model)
+                            logger.info(f"Directory contains {len(contents)} items: {contents[:10]}")
+                            
+                            # Check for expected CTranslate2 files
+                            required_files = ['model.bin', 'config.json']
+                            found_files = [f for f in required_files if f in contents]
+                            missing_files = [f for f in required_files if f not in contents]
+                            
+                            if found_files:
+                                logger.info(f"Found CTranslate2 files: {found_files}")
+                            if missing_files:
+                                logger.warning(f"Missing CTranslate2 files: {missing_files}")
+                                logger.warning("Model may not be in correct CTranslate2 format")
+                                
+                        except Exception as e:
+                            logger.warning(f"Could not list directory contents: {e}")
+                    else:
+                        logger.info(f"Path is file")
+                else:
+                    logger.warning(f"Path does not exist: {config.whisper_model}")
+                    logger.warning("Will attempt to download from Hugging Face")
         
         # Initialize faster-whisper model
-        is_local_path = os.path.isdir(config.whisper_model) or os.path.isfile(config.whisper_model)
         try:
+            if config.show_details:
+                logger.info("Starting WhisperModel initialization...")
+                logger.info("This may take a moment if downloading model files...")
+                
+                # Add a progress indicator thread for long operations
+                import threading
+                stop_indicator = threading.Event()
+                
+                def progress_indicator():
+                    dots = 0
+                    while not stop_indicator.is_set():
+                        time.sleep(2)
+                        if not stop_indicator.is_set():
+                            dots = (dots + 1) % 4
+                            logger.info(f"Still initializing{'.' * dots}")
+                
+                indicator_thread = threading.Thread(target=progress_indicator, daemon=True)
+                indicator_thread.start()
+            
             self.whisper_model = WhisperModel(
                 config.whisper_model, 
                 device=device, 
                 compute_type=compute_type,
                 cpu_threads=cpu_threads,
-                download_root=None if not is_local_path else os.path.dirname(config.whisper_model),
-                local_files_only=is_local_path
+                download_root=None,
+                local_files_only=False
             )
+            
+            if config.show_details:
+                stop_indicator.set()
+                indicator_thread.join(timeout=1)
+                logger.info("✓ WhisperModel initialized successfully")
+                
         except Exception as e:
+            if config.show_details:
+                stop_indicator.set()
+                indicator_thread.join(timeout=1)
+                logger.error(f"✗ WhisperModel initialization failed: {e}")
+                logger.error(f"Exception type: {type(e).__name__}")
+                import traceback
+                logger.error(f"Full traceback:\n{traceback.format_exc()}")
+                
+                # Additional debugging for path issues
+                if os.path.exists(config.whisper_model):
+                    logger.error(f"Model path exists but initialization failed")
+                    logger.error(f"Expected CTranslate2 format files: model.bin, config.json, vocabulary.txt")
+                    if os.path.isdir(config.whisper_model):
+                        try:
+                            files = os.listdir(config.whisper_model)
+                            required_files = ['model.bin', 'config.json']
+                            missing = [f for f in required_files if f not in files]
+                            if missing:
+                                logger.error(f"Missing required files: {missing}")
+                                logger.error(f"Files found: {files}")
+                                logger.error("The model directory must contain CTranslate2 format files.")
+                                logger.error("Convert OpenAI Whisper models with:")
+                                logger.error("  ct2-transformers-converter --model openai/whisper-base --output_dir <path>")
+                        except Exception as list_error:
+                            logger.error(f"Could not list directory: {list_error}")
+            
             logger.warning(f"Failed to initialize with preferred settings: {e}")
+            
             # Fallback to CPU with default settings
-            self.whisper_model = WhisperModel(config.whisper_model, device="cpu")
-            logger.info("Fallback: Using CPU with default settings")
+            if config.show_details:
+                logger.info("Attempting fallback: CPU with default settings...")
+            
+            try:
+                self.whisper_model = WhisperModel(config.whisper_model, device="cpu")
+                
+                if config.show_details:
+                    logger.info("✓ Fallback initialization successful")
+                else:
+                    logger.info("Fallback: Using CPU with default settings")
+            except Exception as fallback_error:
+                logger.error(f"Fallback initialization also failed: {fallback_error}")
+                logger.error("Cannot initialize Whisper model. Please check:")
+                logger.error("  1. Model name is valid (tiny, base, small, medium, large)")
+                logger.error("  2. Model path is correct and in CTranslate2 format")
+                logger.error("  3. Network connection (if downloading)")
+                logger.error("  4. Sufficient disk space and RAM")
+                raise RuntimeError(f"Failed to initialize Whisper model: {fallback_error}")
         
         self.ffmpeg = find_executable('ffmpeg')
         self.ffprobe = find_executable('ffprobe') 
