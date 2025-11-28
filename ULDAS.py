@@ -18,7 +18,7 @@ from packaging import version
 import psutil
 import re
 
-VERSION = '2025.10.26'
+VERSION = '2025.11.27'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -437,14 +437,15 @@ class MKVLanguageDetector:
             logger.info(f"Initializing faster-whisper with device: {device}, compute_type: {compute_type}")
         
         # Initialize faster-whisper model
+        is_local_path = os.path.isdir(config.whisper_model) or os.path.isfile(config.whisper_model)
         try:
             self.whisper_model = WhisperModel(
                 config.whisper_model, 
                 device=device, 
                 compute_type=compute_type,
                 cpu_threads=cpu_threads,
-                download_root=None,
-                local_files_only=False
+                download_root=None if not is_local_path else os.path.dirname(config.whisper_model),
+                local_files_only=is_local_path
             )
         except Exception as e:
             logger.warning(f"Failed to initialize with preferred settings: {e}")
