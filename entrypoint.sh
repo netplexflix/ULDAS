@@ -3,6 +3,8 @@
 PUID=${PUID:-0}
 PGID=${PGID:-0}
 
+mv /app/config.example.yml /app/config/config.example.yml
+
 # Create group and user if PUID/PGID are set to non-root
 if [ "$PUID" != "0" ] && [ "$PGID" != "0" ]; then
     # Check if group with this GID exists, if not create it
@@ -25,7 +27,6 @@ if [ "$PUID" != "0" ] && [ "$PGID" != "0" ]; then
 
     # Create cache directory and set ownership
     mkdir -p /app/.cache
-    mv /app/config.example.yml /app/config/config.example.yml
     chown -R "$PUID:$PGID" /app/config /app/.cache
 
     echo "Running as $USER_NAME (PUID=$PUID, PGID=$PGID)"
