@@ -8,8 +8,8 @@ services:
       - PGID=1000
     volumes:
       - ./config:/app/config
-      - /path/to/movies:/media/movies
-      - /path/to/tv:/media/tv
+      - /path/to/movies:/movies
+      - /path/to/tv:/tv
     deploy:
       resources:
         reservations:

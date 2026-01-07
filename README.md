@@ -55,8 +55,8 @@ ULDAS is available as a Docker image. The image supports both CPU and Nvidia GPU
 ```sh
 docker run --rm --gpus all \
   -v /path/to/config:/app/config \
-  -v /path/to/movies:/media/movies \
-  -v /path/to/tv:/media/tv \
+  -v /path/to/movies:/movies \
+  -v /path/to/tv:/tv \
   netplexflix/uldas:latest
 ```
 
@@ -65,11 +65,12 @@ docker run --rm --gpus all \
 | Mount | Description |
 |-------|-------------|
 | `/app/config` | Config file and tracking data (required) |
-| `/media/movies` | Your movies library |
-| `/media/tv` | Your TV shows library |
+| `/movies` | Your movies library |
+| `/tv` | Your TV shows library |
 
 > [!NOTE]
-> Update your `config.yml` to use the container paths (e.g., `/media/movies` instead of your local path).
+> Your `config.yml` paths need to match the paths inside your container (e.g. if you mount your movies in the container as `/media/movies` your path in your config should be `/media/movies`)
+> Extra paths can be added as long as they are also listed in the config.
 
 ### Environment Variables
 

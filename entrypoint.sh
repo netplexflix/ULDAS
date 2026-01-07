@@ -3,7 +3,12 @@
 PUID=${PUID:-0}
 PGID=${PGID:-0}
 
-mv /app/config.example.yml /app/config/config.example.yml
+# Check if config file exists, if not create it from example stored in /app
+if [ ! -f /app/config/config.yml ]; then
+    echo "Config file not found, creating from example..."
+    mkdir -p /app/config
+    mv /app/config.example.yml /app/config/config.yml
+fi
 
 # Create group and user if PUID/PGID are set to non-root
 if [ "$PUID" != "0" ] && [ "$PGID" != "0" ]; then

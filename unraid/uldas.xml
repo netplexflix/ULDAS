@@ -35,10 +35,10 @@
     ULDAS automatically detects and tags audio/subtitle languages in your media files using Whisper AI.
   </Description>
   <Config Name="Config Directory" Target="/app/config" Default="/mnt/user/appdata/uldas" Mode="rw" Description="Configuration and tracking data" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/uldas</Config>
-  <Config Name="Movies" Target="/media/movies" Default="/mnt/user/Movies" Mode="rw" Description="Path to your Movies library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Movies</Config>
-  <Config Name="TV Shows" Target="/media/tv" Default="/mnt/user/TV" Mode="rw" Description="Path to your TV Shows library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/TV</Config>
-  <Config Name="4K Movies" Target="/media/movies_4k" Default="/mnt/user/Movies_4K" Mode="rw" Description="Path to your 4K Movies library (optional)" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/Movies_4K</Config>
-  <Config Name="4K TV Shows" Target="/media/tv_4k" Default="/mnt/user/TV_4K" Mode="rw" Description="Path to your 4K TV Shows library (optional)" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/TV_4K</Config>
+  <Config Name="Movies" Target="/movies" Default="" Mode="rw" Description="Path to your Movies library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/plex/Movies</Config>
+  <Config Name="TV Shows" Target="/tv" Default="" Mode="rw" Description="Path to your TV Shows library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/plex/TV</Config>
+  <Config Name="4K Movies" Target="/movies_4k" Default="" Mode="rw" Description="Path to your 4K Movies library (optional see docs)" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/plex/Movies_4K</Config>
+  <Config Name="4K TV Shows" Target="/tv_4k" Default="" Mode="rw" Description="Path to your 4K TV Shows library (optional see docs)" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/plex/TV_4K</Config>
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
   <Config Name="Nvidia Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Nvidia GPU devices to expose (requires --runtime=nvidia in extra parameters)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>

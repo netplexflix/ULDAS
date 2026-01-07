@@ -1,6 +1,6 @@
 path:
-  - P:/Movies
-  - P:/TV
+  - /movies
+  - /tv
 remux_to_mkv: true
 show_details: false
 dry_run: false
