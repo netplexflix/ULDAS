@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>ULDAS</Name>
+  <Repository>netplexflix/uldas:latest</Repository>
+  <Registry>https://hub.docker.com/r/netplexflix/uldas</Registry>
+  <Branch>
+    <Tag>latest</Tag>
+    <TagDescription>Latest build</TagDescription>
+  </Branch>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/netplexflix/ULDAS/issues</Support>
+  <Project>https://github.com/netplexflix/ULDAS</Project>
+  <Overview>
+    ULDAS (Unified Language Detection and Subtitle Processing) automatically detects and tags audio/subtitle languages in your media files using Whisper AI. It can also analyze subtitles for forced/SDH detection.
+
+    Features:
+    - Automatic audio language detection using Whisper AI
+    - Subtitle language detection and analysis
+    - Forced subtitle detection
+    - SDH (Subtitles for Deaf/Hard of Hearing) detection
+    - MKV remuxing support
+    - Tracking to avoid reprocessing files
+
+    Please see the GitHub page for detailed setup instructions and usage guidelines.
+  </Overview>
+  <Category>MediaApp:Video Tools:</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/netplexflix/ULDAS/main/unraid/uldas.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/netplexflix/ULDAS/main/unraid/app.png</Icon>
+  <ExtraParams>--rm</ExtraParams>
+  <DateInstalled></DateInstalled>
+  <Description>
+    ULDAS automatically detects and tags audio/subtitle languages in your media files using Whisper AI.
+  </Description>
+  <Config Name="Config Directory" Target="/app/config" Default="/mnt/user/appdata/uldas" Mode="rw" Description="Configuration and tracking data" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/uldas</Config>
+  <Config Name="Movies" Target="/movies" Default="" Mode="rw" Description="Path to your Movies library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/plex/Movies</Config>
+  <Config Name="TV Shows" Target="/tv" Default="" Mode="rw" Description="Path to your TV Shows library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/plex/TV</Config>
+  <Config Name="4K Movies" Target="/movies_4k" Default="" Mode="rw" Description="Path to your 4K Movies library (optional see docs)" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/plex/Movies_4K</Config>
+  <Config Name="4K TV Shows" Target="/tv_4k" Default="" Mode="rw" Description="Path to your 4K TV Shows library (optional see docs)" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/plex/TV_4K</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="Nvidia Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Nvidia GPU devices to expose (requires --runtime=nvidia in extra parameters)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="Nvidia Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="Nvidia driver capabilities (requires --runtime=nvidia in extra parameters)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+</Container>
