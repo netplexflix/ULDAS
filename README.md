@@ -13,7 +13,7 @@ The script optionally remuxes non MKV video formats to MKV first.
 
 <img width="628" height="58" alt="Image" src="https://github.com/user-attachments/assets/8c1eca62-50cb-4114-9de2-1244dd0a0714" />
 
-Requires 
+Requires
 - [Python >=3.11](https://www.python.org/downloads/)
 - [FFmpeg](https://ffmpeg.org/download.html)
 - [MKVToolNix](https://mkvtoolnix.download/downloads.html)
@@ -43,6 +43,47 @@ cd ULDAS
 ```sh
 pip install -r requirements.txt
 ```
+
+---
+
+## 🐳 Docker
+
+ULDAS is available as a Docker image. The image supports both CPU and Nvidia GPUs.
+
+### Quick Start
+
+```sh
+docker run --rm --gpus all \
+  -v /path/to/config:/app/config \
+  -v /path/to/movies:/movies \
+  -v /path/to/tv:/tv \
+  netplexflix/uldas:latest
+```
+
+### Volume Mounts
+
+| Mount | Description |
+|-------|-------------|
+| `/app/config` | Config file and tracking data (required) |
+| `/movies` | Your movies library |
+| `/tv` | Your TV shows library |
+
+> [!NOTE]
+> Your `config.yml` paths need to match the paths inside your container (e.g. if you mount your movies in the container as `/media/movies` your path in your config should be `/media/movies`)
+> Extra paths can be added as long as they are also listed in the config.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PUID` | `0` | User ID for file permissions |
+| `PGID` | `0` | Group ID for file permissions |
+| `NVIDIA_VISIBLE_DEVICES` | `all` | Used to specify specific Nvidia GPUs to use |
+| `NVIDIA_DRIVER_CAPABILITIES` | `all` | Used to specify specific Nvidia driver capabilities the container has access to |
+
+### Unraid
+
+ULDAS is available in Community Applications. Search for "ULDAS" or install manually using the template.
 
 ---
 
@@ -121,7 +162,7 @@ python ULDAS.py
 > A warning will be given at the end of a run for any files that were marked as 'zxx' (no linguistic content).<br>
 > While it is perfectly possible for a video file to have no linguistic content (silent movies, old Disney cartoons, etc), these could also indicate AI 'hallucinations'.
 > You may want to manually check these files.
-> 
+>
 > ### Subtitle Tracks
 > Tracks with confidence below the `subtitle_confidence_threshold` are automatically skipped and shown in the summary.
 > For image-based (PGS) subtitles without OCR support, language detection will be skipped.

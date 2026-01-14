@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  uldas:
+    container_name: uldas
+    image: netplexflix/uldas:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ./config:/app/config
+      - /path/to/movies:/movies
+      - /path/to/tv:/tv
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"

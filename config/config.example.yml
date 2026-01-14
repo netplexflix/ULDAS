@@ -1,9 +1,9 @@
 path:
-  - P:/Movies
-  - P:/TV
+  - /movies
+  - /tv
 remux_to_mkv: true
 show_details: false
 dry_run: false
 process_subtitles: true
 analyze_forced_subtitles: true
-detect_sdh_subtitles true
+detect_sdh_subtitles: true
