@@ -1,9 +1,15 @@
-name: Build & Push Docker Image (on Release)
+name: Build & Push Docker Image (Develop Branch)
 
 on:
-  release:
-    types: [published]
+  push:
+    branches:
+      - develop
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from'
+        required: false
+        default: 'develop'
 
 permissions:
   contents: read
@@ -17,7 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event.inputs.branch || 'develop' }}
 
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
@@ -38,9 +44,8 @@ jobs:
           images: |
             netplexflix/uldas
           tags: |
-            type=raw,value=latest
-            type=semver,pattern={{version}},enable={{is_default_branch}}
-            type=semver,pattern={{major}}.{{minor}},enable={{is_default_branch}}
+            type=raw,value=develop
+            type=sha,prefix=develop-
 
       - name: Build & Push
         uses: docker/build-push-action@v6
