@@ -12,7 +12,9 @@ ENV PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
+    python3.11-dev \
     python3-pip \
+    build-essential \
     ffmpeg \
     mkvtoolnix \
     tesseract-ocr \
@@ -26,9 +28,17 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
 
 WORKDIR /app
 
-# Install dependencies
+# Upgrade pip first
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# Install PyTorch with CUDA support
+RUN pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+# Install remaining dependencies
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-deps faster-whisper>=1.2.0 && \
+    pip install PyYAML>=6.0.2 requests>=2.32.4 packaging>=21.3 \
+    psutil>=7.0.0 langdetect>=1.0.8 pytesseract>=0.3.13 pillow>=11.3.0
 
 COPY ULDAS.py .
 RUN mkdir -p /app/config /media
