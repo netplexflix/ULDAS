@@ -52,24 +52,37 @@ ULDAS is available as a Docker image. The image supports both CPU and Nvidia GPU
 
 ### Quick Start
 
+For CPU (recommended):
+```sh
+docker run --rm \
+  -v /path/to/config:/app/config \
+  -v /path/to/folder1:/folder1 \
+  -v /path/to/folder2:/folder2 \
+  netplexflix/uldas:latest
+```
+
+For Nvidia GPU (advanced):
+
 ```sh
 docker run --rm --gpus all \
   -v /path/to/config:/app/config \
-  -v /path/to/movies:/movies \
-  -v /path/to/tv:/tv \
+  -v /path/to/folder1:/folder1 \
+  -v /path/to/folder2:/folder2 \
   netplexflix/uldas:latest
 ```
+
+A compose file is avaliable, [here](./docker-compose.yml), aswell for convienence.
 
 ### Volume Mounts
 
 | Mount | Description |
 |-------|-------------|
 | `/app/config` | Config file and tracking data (required) |
-| `/movies` | Your movies library |
-| `/tv` | Your TV shows library |
+| `/folder1` | e.g. Your movies library |
+| `/folder2` | e.g. Your TV shows library |
 
 > [!NOTE]
-> Your `config.yml` paths need to match the paths inside your container (e.g. if you mount your movies in the container as `/media/movies` your path in your config should be `/media/movies`)
+> Your `config.yml` paths need to match the paths inside your container (e.g. if you mount your movies in the container as `/some/host/path:/media/movies` your path in your `config.yml` should be `/media/movies`).
 > Extra paths can be added as long as they are also listed in the config.
 
 ### Environment Variables
@@ -83,7 +96,7 @@ docker run --rm --gpus all \
 
 ### Unraid
 
-ULDAS is available in Community Applications. Search for "ULDAS" or install manually using the template.
+ULDAS is available in Community Applications. Search for "ULDAS" or install manually using the template in [unraid/](./unraid/).
 
 ---
 
