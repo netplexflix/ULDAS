@@ -8,13 +8,6 @@ services:
       - PGID=1000
     volumes:
       - ./config:/app/config
-      - /path/to/movies:/movies
-      - /path/to/tv:/tv
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - /path/to/folder1:/folder1
+      - /path/to/folder2:/folder2
     restart: "no"
