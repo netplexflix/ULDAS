@@ -80,6 +80,7 @@ A compose file is avaliable, [here](./docker-compose.yml), aswell for convienenc
 | `/app/config` | Config file and tracking data (required) |
 | `/folder1` | e.g. Your movies library |
 | `/folder2` | e.g. Your TV shows library |
+| `/tmp/uldas` | optional mount for custom tmp directory|
 
 > [!NOTE]
 > Your `config.yml` paths need to match the paths inside your container (e.g. if you mount your movies in the container as `/some/host/path:/media/movies` your path in your `config.yml` should be `/media/movies`).
@@ -108,6 +109,7 @@ Rename `config.example.yml` to `config.yml` and change the values where needed:
 - **show_details**: `true` will show you more details of what's happening
 - **dry_run**: `true` will do a dry run (will show what it would do, without actually altering any files)
 - **process_subtitles**: `true` will process undefined subtitle tracks
+- **process_external_subtitles**: `true` will process external subtitle files
 - **analyze_forced_subtitles**: `true` will analyze whether a subtitle track has "Forced Subtitles" or not
 - **detect_sdh_subtitles**: `true` will analyze whether a subtitle track has 'hearing impaired' support. (e.g.: [Dogs barking], [Narrator:],... )
 
@@ -132,6 +134,7 @@ Only Change these if you know what you're doing.
 - **reprocess_all** : `true` will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
 - **reprocess_all_subtitles**: `true` will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
 - **operation_timeout_seconds**: 600,  # 10 minutes
+- **temp_dir**: Change temporary directory for audio/subtitle extraction. Leave empty to use system default (/tmp)
 
 Forced subtitle detection thresholds.<br>
 Density-based:
