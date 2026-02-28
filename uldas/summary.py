@@ -102,7 +102,7 @@ def print_detailed_summary(
         if parts:
             print(". ".join(parts))
     else:
-        print("No files required any action")
+        print("No tracks required any action")
 
     if silent_files:
         print(f"\n{YELLOW}⚠️  WARNING: Silent content detected in {len(silent_files)} file(s){RESET}")
@@ -172,7 +172,7 @@ def print_detailed_summary(
             if t_sdh:
                 print(f"SDH subtitles detected: {t_sdh}")
         else:
-            print("\nNo embedded subtitle tracks found to process")
+            print("\nNo tracks required any action")
 
     # ── External subtitle summary ────────────────────────────────────────
     if config.process_external_subtitles:
@@ -215,7 +215,7 @@ def print_detailed_summary(
             if ext_fail:
                 print(f"{RED}Failed: {ext_fail}{RESET}")
         else:
-            print("\nNo new external subtitle files found to process")
+            print("\nNo external subtitle files required any action")
 
     print(f"\nTotal runtime: {format_duration(runtime_seconds)}")
     if config.dry_run:

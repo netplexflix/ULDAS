@@ -5,5 +5,6 @@ remux_to_mkv: true
 show_details: false
 dry_run: false
 process_subtitles: true
+process_external_subtitles: false
 analyze_forced_subtitles: true
 detect_sdh_subtitles: true
