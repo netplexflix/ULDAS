@@ -512,6 +512,30 @@ class MKVLanguageDetector:
         except Exception:
             return {}
 
+    def _read_format_audio_langs(self, file_path: Path) -> Dict[int, str]:
+        """Read audio language tags from format-level metadata (e.g. AVI IAS tags)."""
+        from uldas.constants import LANGUAGE_CODES
+        try:
+            cmd = [self.ffprobe, "-v", "quiet", "-print_format", "json",
+                   "-show_format", str(file_path)]
+            r = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                               encoding="utf-8", errors="replace")
+            tags = json.loads(r.stdout).get("format", {}).get("tags", {})
+        except Exception:
+            return {}
+        result: Dict[int, str] = {}
+        for key, value in tags.items():
+            if not key.upper().startswith("IAS"):
+                continue
+            try:
+                idx = int(key[3:]) - 1          # IAS1 → audio index 0
+            except ValueError:
+                continue
+            code = LANGUAGE_CODES.get(value.lower().strip())
+            if code:
+                result[idx] = normalize_language_code(code)
+        return result
+
     # ── Track finders ────────────────────────────────────────────────────
     def _find_tracks(self, file_path: Path, codec_type: str,
                      only_undefined: bool) -> list:
@@ -835,10 +859,48 @@ class MKVLanguageDetector:
 
         # Remux
         mkv_path = file_path
+        original_audio_langs: Dict[int, str] = {}
         if self.config.remux_to_mkv and file_path.suffix.lower() != ".mkv":
+            # Save defined audio language tags — ffmpeg remux can lose them
+            orig_info = self.get_mkv_info(file_path)
+            undef_langs = {"und", "unknown", "undefined", "undetermined", ""}
+            _aidx = 0
+            for _s in orig_info.get("streams", []):
+                if _s.get("codec_type") != "audio":
+                    continue
+                _lang = None
+                for _k in _s.get("tags", {}):
+                    if _k.lower() in ("language", "lang"):
+                        _lang = _s["tags"][_k].lower().strip()
+                        break
+                if _lang and normalize_language_code(_lang) not in undef_langs:
+                    original_audio_langs[_aidx] = _lang
+                _aidx += 1
+
+            # Also check format-level tags (AVI IAS metadata)
+            fmt_langs = self._read_format_audio_langs(file_path)
+            for _idx, _code in fmt_langs.items():
+                if _idx not in original_audio_langs:
+                    original_audio_langs[_idx] = _code
+
+            if self.config.show_details:
+                logger.debug("Original audio languages for %s: %s",
+                             file_path.name, original_audio_langs or "(none detected)")
+
             mkv_path = self.remux_to_mkv(file_path)
             if mkv_path and mkv_path != file_path:
                 results["was_remuxed"] = True
+                # Re-apply any audio language tags that were lost in remux
+                for _aidx, _lang in original_audio_langs.items():
+                    try:
+                        subprocess.run(
+                            [self.mkvpropedit, str(mkv_path),
+                             "--edit", f"track:a{_aidx + 1}",
+                             "--set", f"language={_lang}"],
+                            capture_output=True, text=True, check=True,
+                        )
+                    except (subprocess.CalledProcessError, Exception):
+                        pass
             elif not mkv_path:
                 results["errors"].append("Failed to remux")
                 return results
@@ -851,6 +913,25 @@ class MKVLanguageDetector:
             tracks = (self.find_all_audio_tracks(mkv_path)
                       if self.config.reprocess_all
                       else self.find_undefined_audio_tracks(mkv_path))
+
+            # After remux, tracks that were already labeled in the original
+            # file may appear undefined (ffmpeg can lose tags).  Re-apply
+            # the known label directly instead of running detection.
+            if (results["was_remuxed"] and original_audio_langs
+                    and not self.config.reprocess_all):
+                genuinely_undefined = []
+                for t in tracks:
+                    tidx = t[0]
+                    if tidx in original_audio_langs:
+                        self.update_mkv_language(
+                            mkv_path, tidx,
+                            original_audio_langs[tidx],
+                            self.config.dry_run,
+                        )
+                    else:
+                        genuinely_undefined.append(t)
+                tracks = genuinely_undefined
+
             results["undefined_tracks"] = len(tracks)
             if not tracks:
                 audio_ok = True
@@ -899,8 +980,40 @@ class MKVLanguageDetector:
         # ── Tracking ─────────────────────────────────────────────────────
         if (self.config.use_tracking and hasattr(self, "tracker")
                 and not self.config.dry_run):
-            self.tracker.mark_processed(mkv_path, audio_ok, subtitle_ok,
-                                        key=abs_key)
+            flags = []
+            if results["was_remuxed"]:
+                flags.append("remuxed")
+                # Use remuxed file path as tracking key so the next run
+                # recognises the .mkv instead of creating a duplicate entry.
+                old_key = abs_key
+                abs_key = os.path.abspath(str(mkv_path))
+                if old_key != abs_key and old_key in self.tracker.data:
+                    del self.tracker.data[old_key]
+                    self.tracker._dirty = True
+            audio_count = 0
+            if results["processed_tracks"]:
+                # Only flag "audio_labeled" for genuinely undefined tracks,
+                # not for labels that were merely restored after remux.
+                genuinely_detected = [
+                    t for t in results["processed_tracks"]
+                    if t["track_index"] not in original_audio_langs
+                ]
+                audio_count = len(genuinely_detected)
+                if audio_count:
+                    flags.append("audio_labeled")
+            subtitle_count = 0
+            sub_res = results.get("subtitle_results")
+            if sub_res and sub_res.get("processed_subtitle_tracks"):
+                subtitle_count = len(sub_res["processed_subtitle_tracks"])
+                flags.append("subtitle_labeled")
+            if not flags:
+                flags.append("no_action_required")
+            self.tracker.mark_processed(
+                mkv_path, audio_ok, subtitle_ok,
+                key=abs_key, flags=flags,
+                audio_tracks_labeled=audio_count,
+                subtitle_tracks_labeled=subtitle_count,
+            )
 
         # Clean up memory between files
         audio_mod._cleanup_cuda_memory()
@@ -912,6 +1025,12 @@ class MKVLanguageDetector:
         video_results = []
         ext_sub_results = []
         total_ext_subs_found = 0
+
+        # Prune tracker entries for files that no longer exist in this dir
+        if self.config.use_tracking and hasattr(self, "tracker"):
+            pruned = self.tracker.prune_missing_files(directory)
+            if pruned and self.config.show_details:
+                logger.info("Pruned %d orphaned tracker entries", pruned)
 
         # ── Video files ──────────────────────────────────────────────────
         video_files = self.find_video_files(directory)

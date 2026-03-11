@@ -1,6 +1,6 @@
 #file: uldas/constants.py
 
-VERSION = "2026.02.28"
+VERSION = "2026.03.11"
 
 # ── Language name → ISO 639-2 (bibliographic) ────────────────────────────
 LANGUAGE_CODES: dict[str, str] = {
@@ -100,6 +100,39 @@ LANGUAGE_CODES: dict[str, str] = {
     "bahasa indonesia": "ind",
     "bahasa malaysia": "may",
     "no linguistic content": "zxx",
+    # Native language names (for AVI IAS tags, etc.)
+    "nederlands": "dut",
+    "vlaams": "dut",
+    "deutsch": "ger",
+    "français": "fre",
+    "español": "spa",
+    "castellano": "spa",
+    "italiano": "ita",
+    "português": "por",
+    "svenska": "swe",
+    "norsk": "nor",
+    "dansk": "dan",
+    "suomi": "fin",
+    "polski": "pol",
+    "magyar": "hun",
+    "türkçe": "tur",
+    "čeština": "cze",
+    "slovenčina": "slo",
+    "slovenščina": "slv",
+    "srpski": "srp",
+    "hrvatski": "hrv",
+    "bosanski": "bos",
+    "shqip": "alb",
+    "română": "rum",
+    "български": "bul",
+    "українська": "ukr",
+    "русский": "rus",
+    "ελληνικά": "gre",
+    "עברית": "heb",
+    "العربية": "ara",
+    "日本語": "jpn",
+    "中文": "chi",
+    "한국어": "kor",
 }
 
 # ── ISO 639-2 (3-letter) → ISO 639-1 (2-letter) ─────────────────────────

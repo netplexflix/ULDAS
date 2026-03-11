@@ -8,7 +8,7 @@
 Do you have Movies or TV shows in your media player for which the audio and/or subtitle tracks are labeled as "undefined" or "unknown"?</br>
 ULDAS (Undefined Language Detector for Audio and Subtitles) solves that problem by:
 
-1. Scanning your video files for audio and subtitle tracks with undefined language
+1. Scanning your video and subtitle files for undefined tracks
 2. Extracting audio and subtitle samples
 3. Using AI speech recognition to detect the audio language
 4. Detecting subtitle language (can also detect if subtitles are [FORCED] and/or [SDH])
@@ -29,17 +29,17 @@ Requires
 ## 📑 Table of Contents
 
 - [🛠️ Installation](#installation)
-  - [1️⃣ Download the script](#download-the-script)
-  - [2️⃣ Install Dependencies](#install-dependencies)
-- [🐳 Docker](#docker)
-  - [Quick Start](#quick-start)
-  - [Volume Mounts](#volume-mounts)
-  - [Environment Variables](#environment-variables)
-  - [Unraid](#unraid)
+    - [Step 1: Install Docker](#step-1-install-docker)
+    - [Step 2: Create docker-compose file](#step-2-create-docker-compose-file)
+    - [Step 3: Update volumes, IDs, port and CRON Schedule](#step-3-update)
+    - [Step 4: Create config](#step-4-create-config)
+    - [Step 5: Configure your settings](#step-5-configure-your-settings)
+    - [Step 6: Run ULDAS](#step-6-run)
+    - [Unraid](#unraid)
 - [⚙️ Configuration](#configuration)
   - [Expert variables](#expert-variables)
   - [Model Size Guide](#model-size-guide)
-- [🚀 Usage](#usage)
+- [🌐 WebUI](#webui)
 - [📄 Supported File Formats](#supported-file-formats)
 - [⌨️ CLI Reference](#cli-reference)
   - [Utility Commands](#utility-commands)
@@ -53,7 +53,8 @@ Requires
   - [Timeouts](#timeouts)
   - [Forced Subtitle Thresholds](#forced-subtitle-thresholds)
   - [CLI ↔ Config File Mapping](#cli--config-file-mapping)
-- [🏞️ Example run summary](#example-run-summary)
+- [🏞️ Example screenshots](#example-screenshots)
+  - [WebUI](#webuiss)
   - [Audio Processing](#audio-processing)
   - [Subtitle Processing](#subtitle-processing-1)
 - [⚠️ Need Help or have Feedback?](#need-help-or-have-feedback)
@@ -64,71 +65,48 @@ Requires
 <a id="installation"></a>
 ## 🛠️ Installation
 
-<a id="download-the-script"></a>
-### 1️⃣ Download the script
-Clone the repository:
-```sh
-git clone https://github.com/netplexflix/ULDAS.git
-cd ULDAS
+<a id="step-1-install-docker"></a>
+#### Step 1: Install Docker
+
+1. **Download Docker Desktop** from [docker.com](https://www.docker.com/products/docker-desktop/)
+2. **Install and start Docker Desktop** on your computer
+3. **Verify installation**: Open a terminal/command prompt and type `docker --version` - you should see a version number
+
+<a id="step-2-create-docker-compose-file"></a>
+#### Step 2: Create Docker Compose File
+
+1. **Create a new folder** for ULDAS on your computer (e.g., `C:\ULDAS` or `/home/user/ULDAS`)
+2. **Download the `docker-compose.yml`** and place it in that folder, or manually create it by copy pasting this content:
+
+```yaml
+version: "3.8"
+services:
+  uldas:
+    container_name: uldas
+    image: netplexflix/uldas:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - CRON_SCHEDULE=0 5 * * 5
+      # Examples:
+      #   "0 3 * * *"    = every day at 3:00 AM
+      #   "0 */6 * * *"  = every 6 hours
+      #   "0 5 * * 5"   = every Friday at 5:00 AM
+      # Leave empty or remove to run once and exit.
+    ports:
+      - "2119:2119"
+    volumes:
+      - ./config:/app/config
+      - /path/to/folder1:/folder1
+      - /path/to/folder2:/folder2
+      # Optional: mount custom temp directory:
+      # - /path/to/temp:/tmp/uldas
+    restart: unless-stopped
 ```
 
-![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Or simply download by pressing the green 'Code' button above and then 'Download Zip'.
-
-<a id="install-dependencies"></a>
-### 2️⃣ Install Dependencies
-- Ensure you have [Python](https://www.python.org/downloads/) installed (`>=3.11` recommended)
-- Open a Terminal in the script's directory
->[!TIP]
->Windows Users: <br/>
->Go to the script folder (where ULDAS.py is).</br>
->Right mouse click on an empty space in the folder and click `Open in Windows Terminal`
-- Install the required dependencies:
-```sh
-pip install -r requirements.txt
-```
-
-***
-
-<a id="docker"></a>
-## 🐳 Docker
-
-ULDAS is available as a Docker image. The image supports both CPU and Nvidia GPUs.
-
-<a id="quick-start"></a>
-### Quick Start
-
-For CPU (recommended):
-```sh
-docker run --rm \
-  -v /path/to/config:/app/config \
-  -v /path/to/folder1:/folder1 \
-  -v /path/to/folder2:/folder2 \
-  netplexflix/uldas:latest
-```
-
-For Nvidia GPU (advanced):
-
-```sh
-docker run --rm --gpus all \
-  -v /path/to/config:/app/config \
-  -v /path/to/folder1:/folder1 \
-  -v /path/to/folder2:/folder2 \
-  netplexflix/uldas:latest
-```
-
-A compose file is avaliable, [here](./docker-compose.yml), aswell for convienence.
-1. Download the `docker-compose.yml` file from this repository. Edit the port and timezone if needed
-2. Pull the latest image:
-```bash
-docker compose pull
-```
-3. Start the container:
-```bash
-docker compose up -d
-```
-
-<a id="volume-mounts"></a>
-### Volume Mounts
+<a id="step-3-update"></a>
+#### Step 3: Update volumes, IDs, port and CRON Schedule
+- Volume Mounts:
 
 | Mount | Description |
 | --- | --- |
@@ -149,15 +127,37 @@ docker compose up -d
 > ```
 > Extra paths can be added as long as they are also listed in the config.
 
-<a id="environment-variables"></a>
-### Environment Variables
+> [!IMPORTANT]
+> The format is: `your-actual-path:container-path`<br>
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PUID` | `0` | User ID for file permissions |
-| `PGID` | `0` | Group ID for file permissions |
-| `NVIDIA_VISIBLE_DEVICES` | `all` | Used to specify specific Nvidia GPUs to use |
-| `NVIDIA_DRIVER_CAPABILITIES` | `all` | Used to specify specific Nvidia driver capabilities the container has access to |
+- **Update the CRON Schedule** Tip: [Crontab.Guru](https://crontab.guru/)
+- **Update port to xxxx:2119** if you want to run the webUI on a different port than 2119.
+
+<a id="step-4-create-config"></a>
+#### Step 4: Create a config
+
+1. Create a subfolder named `config` 
+2. Download `config/config.example.yml` and save it as `config.yml` in your config folder
+
+<a id="step-5-configure-your-settings"></a>
+#### Step 5: Configure Your Settings
+- See [⚙️ Configuration](#️configuration)
+
+<a id="step-6-run"></a>
+#### Step 6: Run ULDAS
+
+1. **Open a terminal/command prompt** in your ULDAS folder
+2. **Type this command** and press Enter:
+   ```bash
+   docker-compose up -d
+   ```
+3. **That's it!** The latest docker container will be pulled from Dockerhub.
+4. **Update**
+   ```bash
+   docker-compose pull
+   ```
+   
+---
 
 <a id="unraid"></a>
 ### Unraid
@@ -181,12 +181,6 @@ Rename `config.example.yml` to `config.yml` and change the values where needed:
 
 <a id="expert-variables"></a>
 ### Expert variables
-
-> [!TIP]
->You can create a config file with a few expert variables by using the following command:
->```sh
->python ULDAS.py --create-config
->```
 
 Only Change these if you know what you're doing.
 - **vad_filter**: Enables Voice Activity Detection to filter out silence and background noise before language analysis (Default: True)
@@ -227,34 +221,11 @@ Absolute count thresholds:
 
 ***
 
-<a id="usage"></a>
-## 🚀 Usage
-
-Run the script with:
-```sh
-python ULDAS.py
-```
-
-> [!TIP]
-> Windows users can create a batch file for quick launching:
-> ```batch
-> "C:\\Path\\To\\Python\\python.exe" "Path\\To\\Script\\ULDAS.py"
-> pause
-> ```
-
-> [!NOTE]
-> ### Audio Tracks
-> A warning will be given at the end of a run for any files that were marked as 'zxx' (no linguistic content).<br>
-> While it is perfectly possible for a video file to have no linguistic content (silent movies, old Disney cartoons, etc), these could also indicate AI 'hallucinations'.
-> You may want to manually check these files.
->
-> ### Subtitle Tracks
-> Tracks with confidence below the `subtitle_confidence_threshold` are automatically skipped and shown in the summary.
-> For image-based (PGS) subtitles without OCR support, language detection will be skipped.
->
-> ### Failed Files
-> If a file is marked as failed, it is likely corrupt. Manually remux or replace it.
-> Renaming of external subtitle files can fail if the targetted name is already in use by another file, or if the file is set to read-only.
+<a id="webui"></a>
+## 🌐 WebUI
+You can access the webui via localhost:2119
+Here you can edit settings and check your log.
+[Screenshots](#webuiss)
 
 ***
 
@@ -419,8 +390,12 @@ Every CLI option corresponds to a key in the YAML configuration file. CLI argume
 
 ***
 
-<a id="example-run-summary"></a>
-## 🏞️ Example run summary:
+<a id="example-screenshots"></a>
+## 🏞️ Example screenshots:
+<a id="webuiss"></a>
+![Image](https://github.com/user-attachments/assets/11dd5e68-1e75-48d8-a1aa-9e23d4073119)
+![Image](https://github.com/user-attachments/assets/e848c31e-dfb2-4886-8596-bf6f2695fe3d)
+![Image](https://github.com/user-attachments/assets/d5fde867-e631-4419-88d6-4af5b29bf8aa)
 
 <a id="audio-processing"></a>
 ### Audio Processing
@@ -435,6 +410,20 @@ Every CLI option corresponds to a key in the YAML configuration file. CLI argume
 
 <a id="need-help-or-have-feedback"></a>
 ### ⚠️ Need Help or have Feedback?
+> [!NOTE]
+> ### Audio Tracks
+> A warning will be given at the end of a run for any files that were marked as 'zxx' (no linguistic content).<br>
+> While it is perfectly possible for a video file to have no linguistic content (silent movies, old Disney cartoons, etc), these could also indicate AI 'hallucinations'.
+> You may want to manually check these files.
+>
+> ### Subtitle Tracks
+> Tracks with confidence below the `subtitle_confidence_threshold` are automatically skipped and shown in the summary.
+> For image-based (PGS) subtitles without OCR support, language detection will be skipped.
+>
+> ### Failed Files
+> If a file is marked as failed, it is likely corrupt. Manually remux or replace it.
+> Renaming of external subtitle files can fail if the targetted name is already in use by another file, or if the file is set to read-only.
+
 - Join our [Discord](https://discord.gg/VBNUJd7tx3)
 
 ***

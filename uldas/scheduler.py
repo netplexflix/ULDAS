@@ -82,12 +82,19 @@ def _convert_dow(cron_dows: list[int]) -> set[int]:
     return {mapping[d] for d in cron_dows}
 
 
-def run_on_schedule(cron_expr: str, run_fn: Callable[[], None]) -> None:
+def run_on_schedule(cron_expr: str, run_fn: Callable[[], None],
+                    state: "Optional[SchedulerState]" = None) -> None:
     """
     Execute *run_fn* immediately, then re-execute at every CRON match.
     Blocks forever (designed for Docker entrypoint use).
+
+    When *state* is provided, the scheduler uses interruptible waits and
+    responds to run-now / stop / resume commands from the web UI.
     """
     logger.info("CRON schedule: %s", cron_expr)
+
+    if state is not None:
+        state.set_cron(cron_expr)
 
     # Validate expression early
     try:
@@ -102,28 +109,75 @@ def run_on_schedule(cron_expr: str, run_fn: Callable[[], None]) -> None:
     print("=" * 60)
     print("ULDAS – Initial run on container start")
     print("=" * 60)
+    if state is not None:
+        state.set_status("running")
     run_fn()
+    if state is not None:
+        state.set_last_run(datetime.now())
 
     # Schedule loop
     while True:
-        now = datetime.now()
-        nxt = next_cron_time(cron_expr, after=now)
-        wait_seconds = (nxt - now).total_seconds()
+        # ── Stopped state: wait until resumed or run-now ─────────────
+        if state is not None and state.is_stopped():
+            state.set_status("stopped")
+            print(f"\n{'=' * 60}")
+            print("ULDAS – Scheduler paused by user")
+            print(f"{'=' * 60}\n")
+            state._wake_event.wait()          # block until woken
+            state._wake_event.clear()
+            if state.is_run_requested():
+                state.clear_run_request()
+                # fall through to execute
+            elif state.is_stopped():
+                continue                      # still stopped
+            else:
+                continue                      # resumed, recalculate
 
-        print(f"\n{'=' * 60}")
-        print(f"Next scheduled run: {nxt.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Waiting {format_wait(wait_seconds)}...")
-        print(f"{'=' * 60}\n")
+        # ── Calculate next CRON time ─────────────────────────────────
+        else:
+            now = datetime.now()
+            nxt = next_cron_time(cron_expr, after=now)
+            wait_seconds = (nxt - now).total_seconds()
 
-        logger.info("Sleeping until %s (%.0f seconds)",
-                     nxt.strftime("%Y-%m-%d %H:%M"), wait_seconds)
+            if state is not None:
+                state.set_next_run(nxt)
+                state.set_status("idle")
 
-        time.sleep(max(0, wait_seconds))
+            print(f"\n{'=' * 60}")
+            print(f"Next scheduled run: {nxt.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Waiting {format_wait(wait_seconds)}...")
+            print(f"{'=' * 60}\n")
 
+            logger.info("Sleeping until %s (%.0f seconds)",
+                         nxt.strftime("%Y-%m-%d %H:%M"), wait_seconds)
+
+            # ── Interruptible wait ───────────────────────────────────
+            if state is not None:
+                woken = state._wake_event.wait(timeout=max(0, wait_seconds))
+                state._wake_event.clear()
+
+                # Check what woke us
+                if state.is_stopped():
+                    continue                  # enter stopped loop
+                if state.is_run_requested():
+                    state.clear_run_request()
+                    # fall through to execute
+                elif not woken:
+                    pass                      # normal CRON trigger
+                else:
+                    continue                  # woken for resume, recalculate
+            else:
+                time.sleep(max(0, wait_seconds))
+
+        # ── Execute ──────────────────────────────────────────────────
         print("=" * 60)
         print(f"ULDAS – Scheduled run at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
+        if state is not None:
+            state.set_status("running")
         run_fn()
+        if state is not None:
+            state.set_last_run(datetime.now())
 
 
 def format_wait(seconds: float) -> str:

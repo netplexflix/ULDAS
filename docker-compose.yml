@@ -13,6 +13,8 @@ services:
       #   "0 5 * * 5"   = every Friday at 5:00 AM
       # Leave empty or remove to run once and exit.
       - CRON_SCHEDULE=0 5 * * 5
+    ports:
+      - "2119:2119"
     volumes:
       - ./config:/app/config
       - /path/to/folder1:/folder1

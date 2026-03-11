@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ULDAS</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --success: #3fb950;
+    --warning: #d29922;
+    --danger: #f85149;
+    --purple: #bc8cff;
+    --cyan: #39d2c0;
+    --radius: 8px;
+    --radius-lg: 12px;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.5;
+    min-height: 100vh;
+}
+
+/* ── Navbar ────────────────────────────────────────────────────────────── */
+.navbar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    height: 56px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.navbar-brand {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-right: 32px;
+    letter-spacing: 1.5px;
+}
+
+.navbar-brand span {
+    color: var(--accent);
+    font-weight: 400;
+    font-size: 12px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+.nav-links { display: flex; gap: 4px; }
+
+.nav-links a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 8px 16px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 500;
+    transition: color 0.15s, background 0.15s;
+}
+
+.nav-links a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.nav-links a.active { color: var(--text-primary); background: var(--bg-tertiary); }
+
+/* ── Main content ─────────────────────────────────────────────────────── */
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+.page { display: none; }
+.page.active { display: block; }
+
+.page-title {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 20px;
+    color: var(--text-primary);
+}
+
+/* ── Stat cards ────────────────────────────────────────────────────────── */
+.stats-grid { margin-bottom: 24px; }
+
+.stats-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.stats-row:last-child { margin-bottom: 0; }
+.stats-row .stat-card { flex: 1; min-width: 0; }
+
+.stat-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    border-left: 4px solid var(--accent);
+    transition: border-color 0.15s;
+}
+
+.stat-card.green  { border-left-color: var(--success); }
+.stat-card.yellow { border-left-color: var(--warning); }
+.stat-card.red    { border-left-color: var(--danger); }
+.stat-card.purple { border-left-color: var(--purple); }
+.stat-card.cyan   { border-left-color: var(--cyan); }
+
+.stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.stat-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+/* ── Settings ──────────────────────────────────────────────────────────── */
+.settings-section {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 20px;
+}
+
+.settings-section h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.setting-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 24px;
+}
+
+.setting-item:last-child { border-bottom: none; }
+
+.setting-info { flex: 1; min-width: 0; }
+
+.setting-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.setting-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+.setting-control {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+}
+
+/* Toggle switch */
+.toggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    cursor: pointer;
+}
+
+.toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.toggle-slider {
+    position: absolute;
+    inset: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    transition: background 0.2s;
+}
+
+.toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 2px;
+    bottom: 2px;
+    background: var(--text-secondary);
+    border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+}
+
+.toggle input:checked + .toggle-slider { background: var(--accent); border-color: var(--accent); }
+.toggle input:checked + .toggle-slider::before { transform: translateX(20px); background: #fff; }
+
+/* Inputs */
+input[type="text"], input[type="number"], input[type="date"], select {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+input[type="text"]:focus, input[type="number"]:focus, input[type="date"]:focus, select:focus {
+    border-color: var(--accent);
+}
+
+input[type="number"] { width: 100px; }
+select { min-width: 120px; }
+
+/* Path list */
+.path-list { display: flex; flex-direction: column; gap: 6px; min-width: 280px; }
+
+.path-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.path-item input { flex: 1; min-width: 200px; }
+
+.btn-icon {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 16px;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.btn-icon:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+.btn-icon.danger:hover { color: var(--danger); border-color: var(--danger); }
+
+/* Buttons */
+.btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn:hover { background: var(--accent-hover); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-secondary {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+.btn-secondary:hover { background: var(--border); }
+
+.settings-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 20px;
+}
+
+/* Advanced toggle */
+.advanced-toggle {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 0 8px 0;
+}
+
+.advanced-warning {
+    background: rgba(210, 153, 34, 0.1);
+    border: 1px solid rgba(210, 153, 34, 0.3);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    color: var(--warning);
+}
+
+/* ── Processing log ───────────────────────────────────────────────────── */
+.log-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.log-search {
+    width: 100%;
+    padding: 10px 14px;
+    font-size: 14px;
+}
+
+.log-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.filter-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    color: var(--text-secondary);
+    padding: 5px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+.filter-btn.active { color: #fff; }
+.filter-btn[data-flag="all"].active { background: var(--accent); border-color: var(--accent); }
+.filter-btn[data-flag="no_action_required"].active { background: var(--text-secondary); border-color: var(--text-secondary); }
+.filter-btn[data-flag="remuxed"].active { background: var(--cyan); border-color: var(--cyan); color: #000; }
+.filter-btn[data-flag="audio_labeled"].active { background: var(--success); border-color: var(--success); color: #000; }
+.filter-btn[data-flag="subtitle_labeled"].active { background: var(--accent); border-color: var(--accent); }
+.filter-btn[data-flag="external_subtitle"].active { background: var(--purple); border-color: var(--purple); }
+.filter-btn[data-flag="failed"].active { background: var(--danger); border-color: var(--danger); }
+
+.filter-btn .checkmark { margin-right: 4px; display: none; }
+.filter-btn.active .checkmark { display: inline; }
+
+/* Log table */
+.log-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13px;
+    table-layout: fixed;
+}
+
+.log-table col.col-date { width: 155px; }
+.log-table col.col-file { width: 38%; }
+.log-table col.col-location { /* takes remaining space */ }
+.log-table col.col-status { width: 90px; }
+
+.log-table thead th {
+    background: var(--bg-secondary);
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 56px;
+    z-index: 10;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.log-table thead th .resize-handle {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+}
+
+.log-table thead th .resize-handle:hover,
+.log-table thead th .resize-handle.resizing {
+    background: var(--accent);
+}
+
+.log-table tbody tr {
+    transition: background 0.1s;
+}
+
+.log-table tbody tr:hover { background: var(--bg-secondary); }
+
+.log-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.log-table td.col-location {
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.load-more-btn {
+    display: block;
+    width: 100%;
+    padding: 10px;
+    margin-top: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.load-more-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+
+/* Badges */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 600;
+    margin: 0 1px;
+    cursor: default;
+}
+
+.badge-gray { background: rgba(139,148,158,0.2); color: var(--text-secondary); }
+.badge-green { background: rgba(63,185,80,0.15); color: var(--success); }
+.badge-blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+.badge-cyan { background: rgba(57,210,192,0.15); color: var(--cyan); }
+.badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
+.badge-red { background: rgba(248,81,73,0.15); color: var(--danger); }
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--text-secondary);
+}
+
+.empty-state p { font-size: 15px; }
+
+/* Toast */
+.toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 20px;
+    font-size: 14px;
+    color: var(--text-primary);
+    z-index: 200;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none;
+}
+
+.toast.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.toast.success { border-left: 3px solid var(--success); }
+.toast.error { border-left: 3px solid var(--danger); }
+
+/* Log count */
+.log-count {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+/* ── Dashboard toolbar ───────────────────────────────────────────────── */
+.dashboard-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.date-range-picker {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+input[type="date"] { color-scheme: dark; }
+
+/* ── Chart section ───────────────────────────────────────────────────── */
+.chart-section {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+}
+
+.chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.chart-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.chart-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.chart-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.chart-control label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.chart-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.chart-container {
+    position: relative;
+    height: 300px;
+}
+
+/* ── Status bar ───────────────────────────────────────────────────────── */
+.status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 20px;
+    margin-bottom: 20px;
+}
+
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.status-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.status-dot.running {
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+    animation: status-pulse 1.5s ease-in-out infinite;
+}
+
+.status-dot.idle {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+}
+
+.status-dot.stopped {
+    background: var(--warning);
+    box-shadow: 0 0 6px var(--warning);
+}
+
+.status-dot.error {
+    background: var(--danger);
+    box-shadow: 0 0 6px var(--danger);
+}
+
+@keyframes status-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.status-text {
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.status-controls {
+    display: flex;
+    gap: 8px;
+    margin-left: 24px;
+}
+
+.btn-control {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+}
+
+.btn-control:hover { background: var(--accent-hover); }
+.btn-control:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-control.btn-stop {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+.btn-control.btn-stop:hover { background: var(--border); }
+
+.status-bar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.last-run-summary {
+    border-left: 1px solid var(--border);
+    margin-left: 20px;
+    padding-left: 20px;
+}
+
+.last-run-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.last-run-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+.last-run-stat {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.last-run-stat strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ── Navbar ──────────────────────────────────────────────────────────── -->
+<nav class="navbar">
+    <div class="navbar-brand">ULDAS <span>v{{ version }}</span></div>
+    <div class="nav-links">
+        <a href="#" data-page="dashboard" class="active">Dashboard</a>
+        <a href="#" data-page="settings">Settings</a>
+        <a href="#" data-page="log">Processing Log</a>
+    </div>
+</nav>
+
+<div class="container">
+
+<!-- ── Dashboard ───────────────────────────────────────────────────────── -->
+<div id="page-dashboard" class="page active">
+    <h1 class="page-title">Dashboard</h1>
+
+    <div class="status-bar" id="status-bar">
+        <div class="status-bar-top">
+            <div class="status-indicator">
+                <span class="status-dot" id="status-dot"></span>
+                <span class="status-text" id="status-text">Loading...</span>
+            </div>
+            <div class="status-controls" id="status-controls" style="display:none">
+                <button class="btn-control" id="btn-run-now" onclick="schedulerRunNow()">Run Now</button>
+                <button class="btn-control btn-stop" id="btn-stop" onclick="schedulerStop()">Stop</button>
+                <button class="btn-control" id="btn-start" onclick="schedulerStart()" style="display:none">Resume</button>
+            </div>
+        </div>
+        <div class="last-run-summary" id="last-run-summary" style="display:none">
+            <div class="last-run-label">Last run</div>
+            <div class="last-run-stats" id="last-run-stats"></div>
+        </div>
+    </div>
+
+    <div class="dashboard-toolbar">
+        <div class="date-range-picker">
+            <select id="date-preset">
+                <option value="all">All Time</option>
+                <option value="7">Last 7 Days</option>
+                <option value="30">Last 30 Days</option>
+                <option value="90">Last 90 Days</option>
+                <option value="365">Last Year</option>
+                <option value="custom">Custom Range</option>
+            </select>
+            <div id="custom-date-range" style="display:none">
+                <input type="date" id="date-start">
+                <span style="color:var(--text-secondary)">to</span>
+                <input type="date" id="date-end">
+                <button class="btn" onclick="applyCustomRange()" style="padding:6px 16px;font-size:13px">Apply</button>
+            </div>
+        </div>
+    </div>
+    <div class="stats-grid" id="stats-grid"></div>
+    <div class="chart-section">
+        <div class="chart-header">
+            <h2>Processing History</h2>
+            <div class="chart-controls">
+                <div class="chart-control">
+                    <label>Group by</label>
+                    <select id="chart-granularity">
+                        <option value="day">Day</option>
+                        <option value="week">Week</option>
+                        <option value="month" selected>Month</option>
+                        <option value="year">Year</option>
+                    </select>
+                </div>
+                <div class="chart-control">
+                    <label>Show last</label>
+                    <input type="number" id="chart-limit" value="12" min="1" max="365">
+                </div>
+            </div>
+        </div>
+        <div class="chart-filters" id="chart-filters"></div>
+        <div class="chart-container">
+            <canvas id="history-chart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- ── Settings ────────────────────────────────────────────────────────── -->
+<div id="page-settings" class="page">
+    <h1 class="page-title">Settings</h1>
+    <div class="settings-section" id="basic-settings">
+        <h2>General</h2>
+        <div id="basic-options"></div>
+    </div>
+    <div class="advanced-toggle">
+        <label class="toggle">
+            <input type="checkbox" id="toggle-advanced">
+            <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:14px;font-weight:500;">Show Advanced Options</span>
+    </div>
+    <div class="settings-section" id="advanced-settings" style="display:none">
+        <h2>Advanced</h2>
+        <div class="advanced-warning">
+            These settings affect how ULDAS processes and detects languages. Only change them if you understand their impact.
+        </div>
+        <div id="advanced-options"></div>
+    </div>
+    <div class="settings-actions">
+        <button class="btn" id="btn-save" onclick="saveConfig()">Save Settings</button>
+    </div>
+</div>
+
+<!-- ── Processing Log ──────────────────────────────────────────────────── -->
+<div id="page-log" class="page">
+    <h1 class="page-title">Processing Log</h1>
+    <div class="log-controls">
+        <input type="text" class="log-search" id="log-search" placeholder="Filter by filename...">
+        <div class="log-filters" id="log-filters"></div>
+    </div>
+    <div class="log-count" id="log-count"></div>
+    <div id="log-content"></div>
+</div>
+
+</div><!-- /container -->
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ── State ─────────────────────────────────────────────────────────────── */
+let configOptions = [];
+let logEntries = [];
+const logFilters = {
+    search: '',
+    no_action_required: true,
+    remuxed: true,
+    audio_labeled: true,
+    subtitle_labeled: true,
+    external_subtitle: true,
+    failed: true,
+};
+
+/* ── Navigation ────────────────────────────────────────────────────────── */
+document.querySelectorAll('.nav-links a').forEach(a => {
+    a.addEventListener('click', e => {
+        e.preventDefault();
+        const page = a.dataset.page;
+        document.querySelectorAll('.nav-links a').forEach(l => l.classList.remove('active'));
+        a.classList.add('active');
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        document.getElementById('page-' + page).classList.add('active');
+
+        if (page === 'dashboard') { fetchStats(); fetchTimeSeries(); }
+        if (page === 'settings' && configOptions.length === 0) fetchConfig();
+        if (page === 'log' && logEntries.length === 0) fetchLog();
+    });
+});
+
+/* ── Toast ──────────────────────────────────────────────────────────────── */
+function showToast(message, type) {
+    const t = document.getElementById('toast');
+    t.textContent = message;
+    t.className = 'toast show ' + (type || '');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.className = 'toast', 3000);
+}
+
+/* ── Dashboard ─────────────────────────────────────────────────────────── */
+let dateRange = { start: null, end: null };
+
+async function fetchStats() {
+    try {
+        let url = '/api/stats';
+        const params = new URLSearchParams();
+        if (dateRange.start) params.set('start', dateRange.start);
+        if (dateRange.end) params.set('end', dateRange.end);
+        if (params.toString()) url += '?' + params.toString();
+
+        const res = await fetch(url);
+        const stats = res.ok ? await res.json() : {};
+        renderDashboard(stats);
+    } catch (e) {
+        console.error('Failed to fetch stats', e);
+    }
+}
+
+function renderDashboard(s) {
+    const grid = document.getElementById('stats-grid');
+    const rows = [
+        [
+            { value: s.total_tracked || 0, label: 'Total Tracked', cls: '' },
+            { value: s.video_files_tracked || 0, label: 'Video Files', cls: '' },
+            { value: s.external_subtitles_tracked || 0, label: 'External Subtitles', cls: 'purple' },
+        ],
+        [
+            { value: s.audio_labeled || 0, label: 'Audio Tracks Labeled', cls: 'green' },
+            { value: s.subtitle_labeled || 0, label: 'Subtitle Tracks Labeled', cls: 'green' },
+            { value: s.external_subtitle_labeled || 0, label: 'External Subtitle Tracks Labeled', cls: 'purple' },
+        ],
+        [
+            { value: s.remuxed || 0, label: 'Remuxed', cls: 'cyan' },
+            { value: s.failed || 0, label: 'Failed', cls: 'red' },
+        ],
+    ];
+    grid.innerHTML = rows.map(row =>
+        `<div class="stats-row">${row.map(c =>
+            `<div class="stat-card ${c.cls}">
+                <div class="stat-value">${c.value.toLocaleString()}</div>
+                <div class="stat-label">${c.label}</div>
+            </div>`
+        ).join('')}</div>`
+    ).join('');
+}
+
+/* ── Date range picker ─────────────────────────────────────────────────── */
+document.getElementById('date-preset').addEventListener('change', function() {
+    const val = this.value;
+    const customDiv = document.getElementById('custom-date-range');
+
+    if (val === 'custom') {
+        customDiv.style.display = 'flex';
+        return;
+    }
+
+    customDiv.style.display = 'none';
+
+    if (val === 'all') {
+        dateRange = { start: null, end: null };
+    } else {
+        const days = parseInt(val);
+        const now = Date.now() / 1000;
+        dateRange = { start: now - days * 86400, end: null };
+    }
+
+    fetchStats();
+});
+
+function applyCustomRange() {
+    const startEl = document.getElementById('date-start');
+    const endEl = document.getElementById('date-end');
+
+    dateRange.start = startEl.value ? new Date(startEl.value).getTime() / 1000 : null;
+    dateRange.end = endEl.value ? (new Date(endEl.value).getTime() / 1000 + 86400) : null;
+
+    fetchStats();
+}
+
+/* ── Processing history chart ──────────────────────────────────────────── */
+const CHART_CATEGORY_CONFIG = {
+    no_action_required: { label: 'No Action Required', color: 'rgba(139,148,158,0.8)' },
+    remuxed:            { label: 'Remuxed',            color: 'rgba(57,210,192,0.8)' },
+    audio_labeled:      { label: 'Audio Labeled',      color: 'rgba(63,185,80,0.8)' },
+    subtitle_labeled:   { label: 'Subtitles Labeled',  color: 'rgba(88,166,255,0.8)' },
+    external_subtitle:  { label: 'External Subtitle',  color: 'rgba(188,140,255,0.8)' },
+    failed:             { label: 'Failed',             color: 'rgba(248,81,73,0.8)' },
+};
+
+let historyChart = null;
+const chartFilters = { _all: true };
+Object.keys(CHART_CATEGORY_CONFIG).forEach(k => chartFilters[k] = true);
+
+async function fetchTimeSeries() {
+    const granularity = document.getElementById('chart-granularity').value;
+    const limit = document.getElementById('chart-limit').value;
+
+    try {
+        const res = await fetch(`/api/stats/timeseries?granularity=${granularity}&limit=${limit}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderChart(data);
+    } catch (e) {
+        console.error('Failed to fetch time series', e);
+    }
+}
+
+function renderChart(data) {
+    const ctx = document.getElementById('history-chart').getContext('2d');
+
+    if (historyChart) historyChart.destroy();
+
+    const datasets = Object.entries(CHART_CATEGORY_CONFIG).map(([key, config]) => ({
+        label: config.label,
+        data: data.datasets[key] || [],
+        backgroundColor: config.color,
+        borderRadius: 2,
+        maxBarThickness: 50,
+        hidden: !chartFilters._all && !chartFilters[key],
+    }));
+
+    historyChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: data.labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    stacked: true,
+                    grid: { display: false },
+                    ticks: { color: '#8b949e', maxRotation: 45 },
+                },
+                y: {
+                    stacked: true,
+                    beginAtZero: true,
+                    grid: { color: 'rgba(48,54,61,0.3)' },
+                    ticks: { color: '#8b949e', precision: 0 },
+                },
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#21262d',
+                    borderColor: '#30363d',
+                    borderWidth: 1,
+                    titleColor: '#e6edf3',
+                    bodyColor: '#8b949e',
+                    cornerRadius: 8,
+                    padding: 10,
+                },
+            },
+        },
+    });
+}
+
+function initChartFilters() {
+    const container = document.getElementById('chart-filters');
+    const allBtn = `<button class="filter-btn active" data-flag="all"><span class="checkmark">&#10003;</span>All</button>`;
+    const catBtns = Object.entries(CHART_CATEGORY_CONFIG).map(([key, config]) =>
+        `<button class="filter-btn" data-flag="${key}"><span class="checkmark">&#10003;</span>${config.label}</button>`
+    ).join('');
+    container.innerHTML = allBtn + catBtns;
+
+    container.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const flag = btn.dataset.flag;
+            if (flag === 'all') {
+                Object.keys(CHART_CATEGORY_CONFIG).forEach(f => chartFilters[f] = true);
+                chartFilters._all = true;
+            } else if (chartFilters._all) {
+                Object.keys(CHART_CATEGORY_CONFIG).forEach(f => chartFilters[f] = false);
+                chartFilters[flag] = true;
+                chartFilters._all = false;
+            } else {
+                chartFilters[flag] = !chartFilters[flag];
+                if (!Object.keys(CHART_CATEGORY_CONFIG).some(f => chartFilters[f])) {
+                    Object.keys(CHART_CATEGORY_CONFIG).forEach(f => chartFilters[f] = true);
+                    chartFilters._all = true;
+                }
+            }
+            updateChartFilterButtons();
+            applyChartFilters();
+        });
+    });
+}
+
+function updateChartFilterButtons() {
+    const container = document.getElementById('chart-filters');
+    container.querySelectorAll('.filter-btn').forEach(b => {
+        const f = b.dataset.flag;
+        if (f === 'all') {
+            b.classList.toggle('active', chartFilters._all);
+        } else {
+            b.classList.toggle('active', !chartFilters._all && chartFilters[f]);
+        }
+    });
+}
+
+function applyChartFilters() {
+    if (!historyChart) return;
+    Object.keys(CHART_CATEGORY_CONFIG).forEach((key, idx) => {
+        historyChart.setDatasetVisibility(idx, chartFilters._all || chartFilters[key]);
+    });
+    historyChart.update();
+}
+
+document.getElementById('chart-granularity').addEventListener('change', fetchTimeSeries);
+document.getElementById('chart-limit').addEventListener('change', fetchTimeSeries);
+
+/* ── Settings ──────────────────────────────────────────────────────────── */
+async function fetchConfig() {
+    try {
+        const res = await fetch('/api/config');
+        if (!res.ok) return;
+        configOptions = await res.json();
+        renderSettings();
+    } catch (e) {
+        console.error('Failed to fetch config', e);
+    }
+}
+
+function renderSettings() {
+    const basic = document.getElementById('basic-options');
+    const advanced = document.getElementById('advanced-options');
+    basic.innerHTML = '';
+    advanced.innerHTML = '';
+
+    configOptions.forEach(opt => {
+        const el = createSettingItem(opt);
+        (opt.advanced ? advanced : basic).appendChild(el);
+    });
+}
+
+function createSettingItem(opt) {
+    const div = document.createElement('div');
+    div.className = 'setting-item';
+    div.innerHTML = `
+        <div class="setting-info">
+            <div class="setting-label">${opt.label}</div>
+            <div class="setting-desc">${opt.description}</div>
+        </div>
+        <div class="setting-control" id="ctrl-${opt.key}"></div>`;
+
+    const ctrl = div.querySelector('.setting-control');
+
+    if (opt.type === 'bool') {
+        ctrl.innerHTML = `
+            <label class="toggle">
+                <input type="checkbox" data-key="${opt.key}" ${opt.value ? 'checked' : ''}>
+                <span class="toggle-slider"></span>
+            </label>`;
+    } else if (opt.type === 'select') {
+        const opts = (opt.options || []).map(o =>
+            `<option value="${o}" ${opt.value === o ? 'selected' : ''}>${o}</option>`
+        ).join('');
+        ctrl.innerHTML = `<select data-key="${opt.key}">${opts}</select>`;
+    } else if (opt.type === 'int' || opt.type === 'float') {
+        const step = opt.type === 'float' ? '0.01' : '1';
+        ctrl.innerHTML = `<input type="number" data-key="${opt.key}" value="${opt.value}" step="${step}">`;
+    } else if (opt.type === 'string') {
+        ctrl.innerHTML = `<input type="text" data-key="${opt.key}" value="${opt.value || ''}" style="min-width:200px">`;
+    } else if (opt.type === 'path_list') {
+        const paths = Array.isArray(opt.value) ? opt.value : [opt.value || '.'];
+        const items = paths.map((p, i) => `
+            <div class="path-item">
+                <input type="text" data-key="${opt.key}" data-idx="${i}" value="${p}">
+                <button class="btn-icon danger" onclick="removePath(this)" title="Remove">&times;</button>
+            </div>`).join('');
+        ctrl.innerHTML = `<div class="path-list" data-key="${opt.key}">
+            ${items}
+            <button class="btn-icon" onclick="addPath(this)" title="Add path">+</button>
+        </div>`;
+    }
+
+    return div;
+}
+
+function addPath(btn) {
+    const list = btn.parentElement;
+    const key = list.dataset.key;
+    const items = list.querySelectorAll('.path-item');
+    const idx = items.length;
+    const div = document.createElement('div');
+    div.className = 'path-item';
+    div.innerHTML = `
+        <input type="text" data-key="${key}" data-idx="${idx}" value="" placeholder="/path/to/media">
+        <button class="btn-icon danger" onclick="removePath(this)" title="Remove">&times;</button>`;
+    list.insertBefore(div, btn);
+}
+
+function removePath(btn) {
+    const item = btn.parentElement;
+    const list = item.parentElement;
+    if (list.querySelectorAll('.path-item').length > 1) {
+        item.remove();
+    }
+}
+
+async function saveConfig() {
+    const data = {};
+
+    configOptions.forEach(opt => {
+        if (opt.type === 'bool') {
+            const el = document.querySelector(`[data-key="${opt.key}"]`);
+            if (el) data[opt.key] = el.checked;
+        } else if (opt.type === 'select' || opt.type === 'string') {
+            const el = document.querySelector(`[data-key="${opt.key}"]`);
+            if (el) data[opt.key] = el.value;
+        } else if (opt.type === 'int') {
+            const el = document.querySelector(`[data-key="${opt.key}"]`);
+            if (el) data[opt.key] = parseInt(el.value, 10) || 0;
+        } else if (opt.type === 'float') {
+            const el = document.querySelector(`[data-key="${opt.key}"]`);
+            if (el) data[opt.key] = parseFloat(el.value) || 0;
+        } else if (opt.type === 'path_list') {
+            const els = document.querySelectorAll(`[data-key="${opt.key}"][data-idx]`);
+            const paths = [];
+            els.forEach(el => { if (el.value.trim()) paths.push(el.value.trim()); });
+            data[opt.key] = paths.length ? paths : opt.default;
+        }
+    });
+
+    try {
+        const res = await fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data),
+        });
+        const result = await res.json();
+        if (result.status === 'ok') {
+            showToast('Settings saved successfully', 'success');
+        } else {
+            showToast('Error saving settings: ' + (result.message || 'Unknown'), 'error');
+        }
+    } catch (e) {
+        showToast('Failed to save settings', 'error');
+    }
+}
+
+/* Advanced toggle */
+document.getElementById('toggle-advanced').addEventListener('change', function() {
+    document.getElementById('advanced-settings').style.display = this.checked ? 'block' : 'none';
+});
+
+/* ── Processing Log ────────────────────────────────────────────────────── */
+const FLAG_META = {
+    no_action_required: { label: 'No Action Required', short: '\u2013', badge: 'badge-gray' },
+    remuxed:            { label: 'Remuxed',            short: 'R',      badge: 'badge-cyan' },
+    audio_labeled:      { label: 'Audio Labeled',      short: 'A',      badge: 'badge-green' },
+    subtitle_labeled:   { label: 'Subtitles Labeled',  short: 'S',      badge: 'badge-blue' },
+    external_subtitle:  { label: 'External Subtitle Labeled',  short: 'E',      badge: 'badge-purple' },
+    failed:             { label: 'Failed',             short: 'F',      badge: 'badge-red' },
+};
+
+const LOG_PAGE_SIZE = 200;
+let logFiltered = [];
+let logRenderedCount = 0;
+logFilters._all = true;
+
+function updateFilterButtons() {
+    const container = document.getElementById('log-filters');
+    container.querySelectorAll('.filter-btn').forEach(b => {
+        const f = b.dataset.flag;
+        if (f === 'all') {
+            b.classList.toggle('active', logFilters._all);
+        } else {
+            b.classList.toggle('active', !logFilters._all && logFilters[f]);
+        }
+    });
+}
+
+function initLogFilters() {
+    const container = document.getElementById('log-filters');
+    const allBtn = `<button class="filter-btn active" data-flag="all"><span class="checkmark">&#10003;</span>All</button>`;
+    const flagBtns = Object.entries(FLAG_META).map(([flag, meta]) =>
+        `<button class="filter-btn" data-flag="${flag}"><span class="checkmark">&#10003;</span>${meta.label}</button>`
+    ).join('');
+    container.innerHTML = allBtn + flagBtns;
+
+    container.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const flag = btn.dataset.flag;
+            if (flag === 'all') {
+                Object.keys(FLAG_META).forEach(f => logFilters[f] = true);
+                logFilters._all = true;
+            } else if (logFilters._all) {
+                // Leaving All mode: disable everything, enable only clicked
+                Object.keys(FLAG_META).forEach(f => logFilters[f] = false);
+                logFilters[flag] = true;
+                logFilters._all = false;
+            } else {
+                logFilters[flag] = !logFilters[flag];
+                // If none active, revert to All
+                if (!Object.keys(FLAG_META).some(f => logFilters[f])) {
+                    Object.keys(FLAG_META).forEach(f => logFilters[f] = true);
+                    logFilters._all = true;
+                }
+            }
+            // Instant button feedback
+            updateFilterButtons();
+            // Defer heavy render
+            scheduleRender();
+        });
+    });
+}
+
+let _renderTimer = null;
+function scheduleRender() {
+    document.getElementById('log-count').textContent = 'Filtering\u2026';
+    if (_renderTimer) cancelAnimationFrame(_renderTimer);
+    _renderTimer = requestAnimationFrame(() => { _renderTimer = null; renderLog(); });
+}
+
+document.getElementById('log-search').addEventListener('input', function() {
+    logFilters.search = this.value.toLowerCase();
+    scheduleRender();
+});
+
+async function fetchLog() {
+    try {
+        const res = await fetch('/api/log');
+        if (!res.ok) return;
+        logEntries = await res.json();
+        renderLog();
+    } catch (e) {
+        console.error('Failed to fetch log', e);
+    }
+}
+
+function renderLog() {
+    const container = document.getElementById('log-content');
+    const countEl = document.getElementById('log-count');
+
+    const filtered = logEntries.filter(entry => {
+        if (logFilters.search && !entry.filename.toLowerCase().includes(logFilters.search)) {
+            return false;
+        }
+        if (logFilters._all) return true;
+        const flags = entry.flags || [];
+        return flags.some(f => logFilters[f]);
+    });
+
+    countEl.textContent = `Showing ${filtered.length} of ${logEntries.length} entries`;
+    logFiltered = filtered;
+    logRenderedCount = 0;
+
+    if (filtered.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No matching entries found.</p></div>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table class="log-table">
+            <colgroup>
+                <col class="col-date">
+                <col class="col-file">
+                <col class="col-location">
+                <col class="col-status">
+            </colgroup>
+            <thead><tr>
+                <th>Date<div class="resize-handle"></div></th>
+                <th>File<div class="resize-handle"></div></th>
+                <th>Location<div class="resize-handle"></div></th>
+                <th>Status</th>
+            </tr></thead>
+            <tbody id="log-tbody"></tbody>
+        </table>`;
+
+    loadMoreRows();
+    initColumnResize();
+}
+
+function loadMoreRows() {
+    const tbody = document.getElementById('log-tbody');
+    if (!tbody) return;
+
+    const end = Math.min(logRenderedCount + LOG_PAGE_SIZE, logFiltered.length);
+    const fragment = document.createDocumentFragment();
+
+    for (let i = logRenderedCount; i < end; i++) {
+        const entry = logFiltered[i];
+        const tr = document.createElement('tr');
+        const date = entry.timestamp
+            ? new Date(entry.timestamp * 1000).toLocaleString()
+            : '-';
+        const dir = entry.filepath
+            ? entry.filepath.replace(/[/\\][^/\\]*$/, '')
+            : '';
+        const flags = (entry.flags || []).map(f => {
+            const meta = FLAG_META[f];
+            return meta ? `<span class="badge ${meta.badge}" title="${meta.label}">${meta.short}</span>` : '';
+        }).join(' ');
+
+        tr.innerHTML =
+            `<td title="${date}">${date}</td>` +
+            `<td title="${entry.filename}">${entry.filename}</td>` +
+            `<td class="col-location" title="${dir}">${dir}</td>` +
+            `<td>${flags}</td>`;
+        fragment.appendChild(tr);
+    }
+
+    tbody.appendChild(fragment);
+    logRenderedCount = end;
+
+    const oldBtn = document.getElementById('load-more-btn');
+    if (oldBtn) oldBtn.remove();
+
+    if (logRenderedCount < logFiltered.length) {
+        const remaining = logFiltered.length - logRenderedCount;
+        const btn = document.createElement('button');
+        btn.id = 'load-more-btn';
+        btn.className = 'load-more-btn';
+        btn.textContent = `Load more (${remaining.toLocaleString()} remaining)`;
+        btn.onclick = loadMoreRows;
+        document.getElementById('log-content').appendChild(btn);
+    }
+}
+
+function initColumnResize() {
+    const table = document.querySelector('.log-table');
+    if (!table) return;
+    const cols = table.querySelectorAll('colgroup col');
+    const ths = table.querySelectorAll('thead th');
+
+    // Lock all columns to their current pixel widths
+    ths.forEach((th, i) => { if (cols[i]) cols[i].style.width = th.offsetWidth + 'px'; });
+
+    ths.forEach((th, idx) => {
+        const handle = th.querySelector('.resize-handle');
+        if (!handle) return;
+
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            const startX = e.pageX;
+            const startWidth = cols[idx] ? cols[idx].offsetWidth || parseInt(cols[idx].style.width) : th.offsetWidth;
+            const nextCol = cols[idx + 1];
+            const nextStart = nextCol ? (nextCol.offsetWidth || parseInt(nextCol.style.width)) : 0;
+            handle.classList.add('resizing');
+
+            function onMove(ev) {
+                const delta = ev.pageX - startX;
+                const newW = startWidth + delta;
+                const newNext = nextStart - delta;
+                if (newW >= 60 && (!nextCol || newNext >= 60)) {
+                    cols[idx].style.width = newW + 'px';
+                    if (nextCol) nextCol.style.width = newNext + 'px';
+                }
+            }
+            function onUp() {
+                handle.classList.remove('resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
+
+/* ── Scheduler status & controls ───────────────────────────────────────── */
+function formatDuration(seconds) {
+    if (seconds == null || seconds < 0) return '';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm';
+    return '< 1m';
+}
+
+async function fetchStatus() {
+    try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        updateStatusUI(data);
+    } catch (e) {
+        console.error('Failed to fetch status', e);
+    }
+}
+
+function updateStatusUI(data) {
+    const dot = document.getElementById('status-dot');
+    const text = document.getElementById('status-text');
+    const controls = document.getElementById('status-controls');
+    const btnRunNow = document.getElementById('btn-run-now');
+    const btnStop = document.getElementById('btn-stop');
+    const btnStart = document.getElementById('btn-start');
+
+    dot.className = 'status-dot ' + (data.status || '');
+
+    switch (data.status) {
+        case 'running':
+            text.textContent = 'Processing...';
+            btnRunNow.disabled = true;
+            btnStop.style.display = '';
+            btnStop.textContent = 'Stop';
+            btnStart.style.display = 'none';
+            break;
+        case 'idle':
+            if (data.next_run_seconds != null && data.next_run_time) {
+                const timeStr = data.next_run_time.substring(11, 16);
+                text.textContent = 'Idle \u2014 next run in ' + formatDuration(data.next_run_seconds) + ' (' + timeStr + ')';
+            } else {
+                text.textContent = 'Idle';
+            }
+            btnRunNow.disabled = false;
+            btnStop.style.display = '';
+            btnStop.textContent = 'Stop';
+            btnStart.style.display = 'none';
+            break;
+        case 'stopped':
+            text.textContent = 'Stopped by user';
+            btnRunNow.disabled = false;
+            btnStop.style.display = 'none';
+            btnStart.style.display = '';
+            break;
+        case 'error':
+            text.textContent = 'Error: ' + (data.error_message || 'Unknown error');
+            btnRunNow.disabled = false;
+            btnStop.style.display = '';
+            btnStop.textContent = 'Stop';
+            btnStart.style.display = 'none';
+            break;
+        default:
+            text.textContent = 'Status unavailable';
+            btnRunNow.disabled = true;
+            break;
+    }
+
+    controls.style.display = data.has_cron ? '' : 'none';
+
+    // Last run summary
+    const summaryDiv = document.getElementById('last-run-summary');
+    const statsDiv = document.getElementById('last-run-stats');
+    const s = data.last_run_summary;
+    if (s) {
+        const parts = [];
+        if (s.runtime_seconds != null) {
+            const m = Math.floor(s.runtime_seconds / 60);
+            const sec = Math.round(s.runtime_seconds % 60);
+            parts.push('<span class="last-run-stat">Runtime: <strong>' + (m > 0 ? m + 'm ' : '') + sec + 's</strong></span>');
+        }
+        if (s.files_scanned != null)
+            parts.push('<span class="last-run-stat">New files: <strong>' + s.files_scanned + '</strong></span>');
+        if (s.files_processed)
+            parts.push('<span class="last-run-stat">Files processed: <strong>' + s.files_processed + '</strong></span>');
+        if (s.audio_tracks_labeled)
+            parts.push('<span class="last-run-stat">Audio tracks labeled: <strong>' + s.audio_tracks_labeled + '</strong></span>');
+        if (s.subtitle_tracks_labeled)
+            parts.push('<span class="last-run-stat">Subtitle tracks labeled: <strong>' + s.subtitle_tracks_labeled + '</strong></span>');
+        if (s.external_subs_processed)
+            parts.push('<span class="last-run-stat">Ext. subs processed: <strong>' + s.external_subs_processed + '</strong></span>');
+        if (s.files_remuxed)
+            parts.push('<span class="last-run-stat">Remuxed: <strong>' + s.files_remuxed + '</strong></span>');
+        if (s.files_failed)
+            parts.push('<span class="last-run-stat" style="color:var(--danger)">Failed: <strong>' + s.files_failed + '</strong></span>');
+        if (s.files_skipped)
+            parts.push('<span class="last-run-stat">Skipped (already tracked): <strong>' + s.files_skipped + '</strong></span>');
+
+        if (data.last_run_time) {
+            const timeStr = data.last_run_time.substring(11, 16);
+            const dateStr = data.last_run_time.substring(0, 10);
+            const today = new Date().toISOString().substring(0, 10);
+            const label = dateStr === today ? 'Today at ' + timeStr : dateStr + ' ' + timeStr;
+            document.querySelector('.last-run-label').textContent = 'Last run \u2014 ' + label;
+        }
+
+        statsDiv.innerHTML = parts.join('');
+        summaryDiv.style.display = '';
+    } else {
+        summaryDiv.style.display = 'none';
+    }
+}
+
+async function schedulerRunNow() {
+    try {
+        const res = await fetch('/api/scheduler/run-now', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || 'Run triggered', 'success');
+            fetchStatus();
+        } else {
+            showToast(data.message || 'Failed to trigger run', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to trigger run', 'error');
+    }
+}
+
+async function schedulerStop() {
+    try {
+        const res = await fetch('/api/scheduler/stop', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            let msg = data.message || 'Scheduler stopped';
+            if (data.note) msg += ' (' + data.note + ')';
+            showToast(msg, 'success');
+            fetchStatus();
+        } else {
+            showToast(data.message || 'Failed to stop scheduler', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to stop scheduler', 'error');
+    }
+}
+
+async function schedulerStart() {
+    try {
+        const res = await fetch('/api/scheduler/start', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || 'Scheduler resumed', 'success');
+            fetchStatus();
+        } else {
+            showToast(data.message || 'Failed to resume scheduler', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to resume scheduler', 'error');
+    }
+}
+
+/* ── Init ───────────────────────────────────────────────────────────────── */
+initLogFilters();
+initChartFilters();
+fetchStats();
+fetchTimeSeries();
+fetchStatus();
+setInterval(fetchStatus, 3000);
+</script>
+</body>
+</html>

@@ -15,6 +15,7 @@ from uldas.tools import find_executable, find_mkvtoolnix_installation
 from uldas.tracking import ProcessingTracker
 from uldas.updater import check_for_updates
 from uldas.summary import print_detailed_summary
+from uldas.scheduler_state import SchedulerState
 
 logger = logging.getLogger(__name__)
 
@@ -288,19 +289,91 @@ def _apply_cli_overrides(config: Config, args) -> None:
         config.forced_subtitle_max_count_threshold = args.forced_sub_max_count
 
 
-def _run_processing(config: Config, skip_update_check: bool = False) -> None:
+def _build_run_summary(video_results: list, ext_sub_results: list,
+                       runtime: float) -> dict:
+    """Extract key stats from processing results for the web UI."""
+    files_scanned = len(video_results)
+    files_processed = 0
+    files_failed = 0
+    files_skipped = 0
+    audio_tracks_labeled = 0
+    subtitle_tracks_labeled = 0
+    files_remuxed = 0
+
+    for r in video_results:
+        if r.get("skipped_due_to_tracking"):
+            files_skipped += 1
+            continue
+
+        has_action = False
+        if r.get("was_remuxed"):
+            files_remuxed += 1
+            has_action = True
+
+        audio_tracks_labeled += len(r.get("processed_tracks", []))
+        if r.get("processed_tracks"):
+            has_action = True
+
+        sr = r.get("subtitle_results")
+        if sr:
+            subtitle_tracks_labeled += len(sr.get("processed_subtitle_tracks", []))
+            if sr.get("processed_subtitle_tracks"):
+                has_action = True
+
+        if r.get("failed_tracks") or r.get("errors"):
+            files_failed += 1
+            has_action = True
+
+        if has_action:
+            files_processed += 1
+
+    ext_subs_processed = sum(
+        1 for e in ext_sub_results if e.get("status") == "processed"
+    )
+
+    return {
+        "runtime_seconds": round(runtime, 1),
+        "files_scanned": files_scanned,
+        "files_processed": files_processed,
+        "files_skipped": files_skipped,
+        "files_failed": files_failed,
+        "files_remuxed": files_remuxed,
+        "audio_tracks_labeled": audio_tracks_labeled,
+        "subtitle_tracks_labeled": subtitle_tracks_labeled,
+        "external_subs_processed": ext_subs_processed,
+    }
+
+
+def _run_processing(config: Config, skip_update_check: bool = False,
+                    state: "Optional[SchedulerState]" = None,
+                    config_path: str = "config/config.yml") -> None:
     start = time.time()
 
     if not skip_update_check:
         check_for_updates()
 
+    # Reload config from disk so web UI settings changes take effect
+    config.load_from_file(config_path)
+
     # Apply temp_dir setting
     _apply_temp_dir(config)
 
     # Validate directories
+    if not config.path:
+        msg = "No directories configured"
+        logger.error(msg)
+        if state is not None:
+            state.set_status("error", msg)
+            return
+        sys.exit(1)
+
     for d in config.path:
         if not os.path.isdir(d):
-            logger.error("Directory not found: %s", d)
+            msg = f"Directory not found: {d}"
+            logger.error(msg)
+            if state is not None:
+                state.set_status("error", msg)
+                return
             sys.exit(1)
 
     # Check dependencies
@@ -311,8 +384,12 @@ def _run_processing(config: Config, skip_update_check: bool = False) -> None:
     }
     missing = [(n, s) for n, s in deps.items() if not find_executable(n)]
     if missing:
-        for n, s in missing:
-            logger.error("Missing: %s – install from %s", n, s)
+        msgs = [f"Missing: {n} – install from {s}" for n, s in missing]
+        for m in msgs:
+            logger.error(m)
+        if state is not None:
+            state.set_status("error", "; ".join(msgs))
+            return
         sys.exit(1)
 
     # Import detector here (heavy import due to Whisper)
@@ -325,7 +402,11 @@ def _run_processing(config: Config, skip_update_check: bool = False) -> None:
             print(f"Loading faster-whisper model: {config.whisper_model}")
         detector = MKVLanguageDetector(config)
     except RuntimeError as exc:
-        logger.error("Failed to initialise detector: %s", exc)
+        msg = f"Failed to initialise detector: {exc}"
+        logger.error(msg)
+        if state is not None:
+            state.set_status("error", msg)
+            return
         sys.exit(1)
 
     if config.show_details:
@@ -345,10 +426,23 @@ def _run_processing(config: Config, skip_update_check: bool = False) -> None:
         all_ext_sub_results.extend(ext_sub_results)
         total_ext_subs_found += dir_ext_subs_found
 
+    # Save failed files and external subtitle scan count for the web UI
+    if config.use_tracking and not config.dry_run:
+        ProcessingTracker.save_failed_files_json(
+            "config", all_video_results, all_ext_sub_results)
+        if total_ext_subs_found and hasattr(detector, "tracker"):
+            detector.tracker.save_ext_sub_scan_count(total_ext_subs_found)
+
     runtime = time.time() - start
     print_detailed_summary(all_video_results, all_ext_sub_results,
                            config, runtime, detector,
                            total_ext_subs_found=total_ext_subs_found)
+
+    # Store run summary for the web UI status bar
+    if state is not None:
+        state.set_last_run_summary(
+            _build_run_summary(all_video_results, all_ext_sub_results, runtime)
+        )
 
 
 def main() -> None:
@@ -405,13 +499,32 @@ def main() -> None:
             elif isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
                 h.setLevel(logging.DEBUG)
 
+    # ── Scheduler state (shared between main thread and web UI) ────────
+    sched_state = SchedulerState(config_dir="config")
+
+    # ── Web UI ───────────────────────────────────────────────────────────
+    try:
+        from uldas.webui import start_webui
+        start_webui(config_path=args.config, scheduler_state=sched_state)
+    except Exception as exc:
+        logger.debug("Web UI not started: %s", exc)
+
     # ── CRON scheduling (Docker) ─────────────────────────────────────────
     from uldas.scheduler import get_cron_schedule, run_on_schedule
 
     cron = get_cron_schedule()
     if cron:
         print(f"CRON scheduling enabled: {cron}")
-        run_on_schedule(cron, lambda: _run_processing(config, skip_update_check=args.skip_update_check))
+        run_on_schedule(
+            cron,
+            lambda: _run_processing(config, skip_update_check=args.skip_update_check,
+                                    state=sched_state, config_path=args.config),
+            state=sched_state,
+        )
         # run_on_schedule never returns
     else:
-        _run_processing(config, skip_update_check=args.skip_update_check)
+        sched_state.set_status("running")
+        _run_processing(config, skip_update_check=args.skip_update_check,
+                        state=sched_state, config_path=args.config)
+        if sched_state.status != "error":
+            sched_state.set_status("idle")

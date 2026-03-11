@@ -49,11 +49,13 @@ RUN pip install av
 COPY requirements.txt .
 RUN pip install faster-whisper>=1.2.0 && \
     pip install PyYAML>=6.0.2 requests>=2.32.4 packaging>=21.3 \
-    psutil>=7.0.0 langdetect>=1.0.8 pytesseract>=0.3.13 pillow>=11.3.0
+    psutil>=7.0.0 langdetect>=1.0.8 pytesseract>=0.3.13 pillow>=11.3.0 \
+    flask>=3.0.0
 
 # Copy application code
 COPY ULDAS.py .
-COPY uldas/ ./uldas/
+COPY uldas ./uldas
+RUN find /app/uldas -type f
 
 # Create directories and copy config
 RUN mkdir -p /app/config /media
@@ -65,5 +67,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV PUID=0
 ENV PGID=0
+
+EXPOSE 2119
 
 ENTRYPOINT ["/entrypoint.sh"]

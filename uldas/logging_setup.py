@@ -117,6 +117,9 @@ class _TeeStream:
     def write(self, text):
         if not text:
             return
+        # Decode bytes to str if necessary (e.g. Click/Flask may pass bytes)
+        if isinstance(text, (bytes, bytearray)):
+            text = text.decode(self.encoding, errors='replace')
         # Write to original stream
         try:
             self._original.write(text)

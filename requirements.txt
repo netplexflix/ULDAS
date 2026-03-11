@@ -7,6 +7,7 @@ psutil>=7.0.0
 langdetect>=1.0.8
 pytesseract>=0.3.13
 pillow>=11.3.0
+flask>=3.0.0
 
 # Note: External tools required (install separately):
 # - FFmpeg: https://ffmpeg.org/download.html
