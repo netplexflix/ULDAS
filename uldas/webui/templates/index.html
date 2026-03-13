@@ -322,10 +322,19 @@ select { min-width: 120px; }
     margin-bottom: 16px;
 }
 
+.log-search-row {
+    display: flex;
+    gap: 8px;
+}
+
 .log-search {
-    width: 100%;
+    flex: 1;
     padding: 10px 14px;
     font-size: 14px;
+}
+
+.log-refresh-btn {
+    white-space: nowrap;
 }
 
 .log-filters {
@@ -800,7 +809,10 @@ input[type="date"] { color-scheme: dark; }
 <div id="page-log" class="page">
     <h1 class="page-title">Processing Log</h1>
     <div class="log-controls">
-        <input type="text" class="log-search" id="log-search" placeholder="Filter by filename...">
+        <div class="log-search-row">
+            <input type="text" class="log-search" id="log-search" placeholder="Filter by filename...">
+            <button class="btn log-refresh-btn" onclick="fetchLog()" title="Refresh log">&#x21bb; Refresh</button>
+        </div>
         <div class="log-filters" id="log-filters"></div>
     </div>
     <div class="log-count" id="log-count"></div>
