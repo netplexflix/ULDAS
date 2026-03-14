@@ -238,9 +238,12 @@ class MKVLanguageDetector:
 
     # ── External subtitle file discovery ─────────────────────────────────
     def find_external_subtitle_files(self, directory: str) -> tuple[List[Path], int]:
-        use_fast_skip = (
+        use_tracking = (
             self.config.use_tracking
             and hasattr(self, "tracker")
+        )
+        use_fast_skip = (
+            use_tracking
             and not self.config.force_reprocess
             and not self.config.reprocess_all_subtitles
         )
@@ -273,18 +276,21 @@ class MKVLanguageDetector:
                     # reprocess_all_subtitles is set
                     sub_path = Path(full_path_str)
                     if not self.config.reprocess_all_subtitles:
-                        if ext_sub_mod.has_language_tag(sub_path):
-                            # Check if the tagged file is tracked — if so,
-                            # skip it.  If not tracked, it might have been
-                            # manually tagged or tagged by another tool, so
-                            # we still skip it (it already has a language).
+                        lang_tag = ext_sub_mod.get_language_tag(sub_path)
+                        if lang_tag is not None:
+                            # Already has a language tag — track it as
+                            # no_action_required so the dashboard counts
+                            # it, then skip processing.
+                            if use_tracking and not self.config.dry_run:
+                                self.tracker.mark_external_subtitle_tracked(
+                                    sub_path, language_code=lang_tag,
+                                )
                             skipped_in_scan += 1
                             continue
 
-                    # Fast skip via tracker
+                    # Fast skip via tracker (already processed in a prior run)
                     if use_fast_skip:
-                        abs_path_str = os.path.abspath(full_path_str)
-                        if hasattr(self, "tracker") and self.tracker.is_external_subtitle_processed(sub_path):
+                        if self.tracker.is_external_subtitle_tracked(sub_path):
                             skipped_in_scan += 1
                             continue
 
@@ -302,6 +308,10 @@ class MKVLanguageDetector:
             logger.warning("Permission denied during subtitle scan: %s", exc)
         except Exception as exc:
             logger.error("Error during subtitle scan: %s", exc)
+
+        # Flush tracked no_action_required entries to disk
+        if use_tracking and not self.config.dry_run:
+            self.tracker.save_ext_sub_if_dirty()
 
         total_found = len(all_files) + skipped_in_scan
 

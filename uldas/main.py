@@ -426,12 +426,10 @@ def _run_processing(config: Config, skip_update_check: bool = False,
         all_ext_sub_results.extend(ext_sub_results)
         total_ext_subs_found += dir_ext_subs_found
 
-    # Save failed files and external subtitle scan count for the web UI
+    # Save failed files for the web UI
     if config.use_tracking and not config.dry_run:
         ProcessingTracker.save_failed_files_json(
             "config", all_video_results, all_ext_sub_results)
-        if total_ext_subs_found and hasattr(detector, "tracker"):
-            detector.tracker.save_ext_sub_scan_count(total_ext_subs_found)
 
     runtime = time.time() - start
     print_detailed_summary(all_video_results, all_ext_sub_results,

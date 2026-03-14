@@ -31,19 +31,28 @@ def _is_language_code(token: str) -> bool:
 
 
 def has_language_tag(subtitle_path: Path) -> bool:
+    return get_language_tag(subtitle_path) is not None
+
+
+def get_language_tag(subtitle_path: Path) -> Optional[str]:
+    """Return the language code embedded in the subtitle filename, or *None*.
+
+    Recognises patterns like ``movie.en.srt``, ``movie.eng.srt``,
+    ``movie.en.sdh.srt``, etc.
+    """
     name = subtitle_path.name
     # Split off the final extension
     parts = name.rsplit(".", 2)
     if len(parts) < 3:
         # Only one dot → no language tag  (e.g. "Movie.srt")
-        return False
+        return None
 
     # parts[-2] is the candidate language tag (or flag)
     candidate = parts[-2].lower()
 
     # Check if the candidate itself is a language code
     if _is_language_code(candidate):
-        return True
+        return candidate
 
     # Check if it's a flag like "sdh" or "forced" — if so, look one
     # level deeper for the language code
@@ -52,9 +61,9 @@ def has_language_tag(subtitle_path: Path) -> bool:
         if len(deeper_parts) >= 4:
             deeper_candidate = deeper_parts[-3].lower()
             if _is_language_code(deeper_candidate):
-                return True
+                return deeper_candidate
 
-    return False
+    return None
 
 
 def find_external_subtitles(

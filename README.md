@@ -393,7 +393,7 @@ Every CLI option corresponds to a key in the YAML configuration file. CLI argume
 <a id="example-screenshots"></a>
 ## 🏞️ Example screenshots:
 <a id="webuiss"></a>
-![Image](https://github.com/user-attachments/assets/11dd5e68-1e75-48d8-a1aa-9e23d4073119)
+![Image](https://github.com/user-attachments/assets/12b0d51a-fff8-4f48-8b75-695bfd86691e)
 ![Image](https://github.com/user-attachments/assets/e848c31e-dfb2-4886-8596-bf6f2695fe3d)
 ![Image](https://github.com/user-attachments/assets/d5fde867-e631-4419-88d6-4af5b29bf8aa)
 
