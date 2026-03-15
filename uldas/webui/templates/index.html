@@ -1506,8 +1506,9 @@ function updateStatusUI(data) {
             const sec = Math.round(s.runtime_seconds % 60);
             parts.push('<span class="last-run-stat">Runtime: <strong>' + (m > 0 ? m + 'm ' : '') + sec + 's</strong></span>');
         }
-        if (s.files_scanned != null)
-            parts.push('<span class="last-run-stat">New files: <strong>' + s.files_scanned + '</strong></span>');
+        var newFilesTotal = (s.files_scanned || 0) + (s.new_ext_subs || 0);
+        if (newFilesTotal > 0)
+            parts.push('<span class="last-run-stat">New files: <strong>' + newFilesTotal + '</strong></span>');
         if (s.files_processed)
             parts.push('<span class="last-run-stat">Files processed: <strong>' + s.files_processed + '</strong></span>');
         if (s.audio_tracks_labeled)

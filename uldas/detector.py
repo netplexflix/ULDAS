@@ -237,7 +237,7 @@ class MKVLanguageDetector:
         return all_files
 
     # ── External subtitle file discovery ─────────────────────────────────
-    def find_external_subtitle_files(self, directory: str) -> tuple[List[Path], int]:
+    def find_external_subtitle_files(self, directory: str) -> tuple[List[Path], int, int]:
         use_tracking = (
             self.config.use_tracking
             and hasattr(self, "tracker")
@@ -250,6 +250,7 @@ class MKVLanguageDetector:
 
         all_files: List[Path] = []
         skipped_in_scan = 0
+        new_already_labeled = 0
         dirs_scanned = 0
         last_report = time.monotonic()
         report_interval = 5.0
@@ -272,26 +273,28 @@ class MKVLanguageDetector:
 
                     full_path_str = os.path.join(dirpath, filename)
 
-                    # Skip files that already have a language tag unless
-                    # reprocess_all_subtitles is set
+                    # Fast skip via tracker (already processed in a prior run)
                     sub_path = Path(full_path_str)
+                    if use_fast_skip:
+                        if self.tracker.is_external_subtitle_tracked(sub_path):
+                            skipped_in_scan += 1
+                            continue
+
+                    # Skip files that already have a language tag unless
+                    # reprocess_all_subtitles is set.
+                    # These are NEW files (not in tracker) that don't need
+                    # processing — count them separately.
                     if not self.config.reprocess_all_subtitles:
                         lang_tag = ext_sub_mod.get_language_tag(sub_path)
                         if lang_tag is not None:
-                            # Already has a language tag — track it as
-                            # no_action_required so the dashboard counts
-                            # it, then skip processing.
+                            # New file that already has a language tag —
+                            # track it as no_action_required so the
+                            # dashboard counts it, then skip processing.
                             if use_tracking and not self.config.dry_run:
                                 self.tracker.mark_external_subtitle_tracked(
                                     sub_path, language_code=lang_tag,
                                 )
-                            skipped_in_scan += 1
-                            continue
-
-                    # Fast skip via tracker (already processed in a prior run)
-                    if use_fast_skip:
-                        if self.tracker.is_external_subtitle_tracked(sub_path):
-                            skipped_in_scan += 1
+                            new_already_labeled += 1
                             continue
 
                     all_files.append(sub_path)
@@ -301,7 +304,8 @@ class MKVLanguageDetector:
                     last_report = now
                     logger.info(
                         "Scanning subtitles... %d dirs, %d new files, %d skipped",
-                        dirs_scanned, len(all_files), skipped_in_scan,
+                        dirs_scanned, len(all_files) + new_already_labeled,
+                        skipped_in_scan,
                     )
 
         except PermissionError as exc:
@@ -313,20 +317,21 @@ class MKVLanguageDetector:
         if use_tracking and not self.config.dry_run:
             self.tracker.save_ext_sub_if_dirty()
 
-        total_found = len(all_files) + skipped_in_scan
+        total_found = len(all_files) + new_already_labeled + skipped_in_scan
+        total_new = len(all_files) + new_already_labeled
 
         if self.config.show_details:
             logger.info(
                 "Subtitle scan complete: %d dirs, %d new files, %d skipped",
-                dirs_scanned, len(all_files), skipped_in_scan,
+                dirs_scanned, total_new, skipped_in_scan,
             )
         else:
             print(
-                f"Subtitle scan complete: {len(all_files)} new subtitle files, "
+                f"Subtitle scan complete: {total_new} new subtitle files, "
                 f"{skipped_in_scan} skipped",
             )
 
-        return all_files, total_found
+        return all_files, total_found, total_new
 
     # ── Remux ────────────────────────────────────────────────────────────
     def remux_to_mkv(self, file_path: Path) -> Optional[Path]:
@@ -1031,10 +1036,11 @@ class MKVLanguageDetector:
         return results
 
     # ── Process directory ────────────────────────────────────────────────
-    def process_directory(self, directory: str) -> Tuple[List[Dict], List[Dict], int]:
+    def process_directory(self, directory: str) -> Tuple[List[Dict], List[Dict], int, int]:
         video_results = []
         ext_sub_results = []
         total_ext_subs_found = 0
+        new_ext_subs = 0
 
         # Prune tracker entries for files that no longer exist in this dir
         if self.config.use_tracking and hasattr(self, "tracker"):
@@ -1055,7 +1061,7 @@ class MKVLanguageDetector:
 
         # ── External subtitle files (independent scan) ───────────────────
         if self.config.process_external_subtitles:
-            ext_sub_files, total_ext_subs_found = self.find_external_subtitle_files(directory)
+            ext_sub_files, total_ext_subs_found, new_ext_subs = self.find_external_subtitle_files(directory)
 
             if not ext_sub_files:
                 if self.config.show_details:
@@ -1065,7 +1071,7 @@ class MKVLanguageDetector:
             else:
                 ext_sub_results = self._process_ext_sub_files(ext_sub_files)
 
-        return video_results, ext_sub_results, total_ext_subs_found
+        return video_results, ext_sub_results, total_ext_subs_found, new_ext_subs
 
     def _process_video_files(self, video_files: List[Path]) -> List[Dict]:
         """Batch-validate and process video files."""

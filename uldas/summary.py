@@ -20,6 +20,7 @@ def print_detailed_summary(
     runtime_seconds: float,
     detector=None,
     total_ext_subs_found: int = 0,
+    total_new_ext_subs: int = 0,
 ) -> None:
 
     # ── Tracking Statistics (printed first, above everything else) ───────
@@ -207,8 +208,9 @@ def print_detailed_summary(
                 reason = esr.get("reason", "unknown")
                 print(f"  {RED}{sub_name}: failed ({reason}){RESET}")
 
-        if ext_total:
-            print(f"\nNew external subtitle files found: {ext_total}")
+        new_count = total_new_ext_subs if total_new_ext_subs else ext_total
+        if new_count:
+            print(f"\nNew external subtitle files found: {new_count}")
             print(f"Successfully processed: {ext_proc}")
             if ext_skip:
                 print(f"{YELLOW}Skipped: {ext_skip}{RESET}")

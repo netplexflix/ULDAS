@@ -290,7 +290,8 @@ def _apply_cli_overrides(config: Config, args) -> None:
 
 
 def _build_run_summary(video_results: list, ext_sub_results: list,
-                       runtime: float) -> dict:
+                       runtime: float,
+                       new_ext_subs: int = 0) -> dict:
     """Extract key stats from processing results for the web UI."""
     files_scanned = len(video_results)
     files_processed = 0
@@ -341,6 +342,7 @@ def _build_run_summary(video_results: list, ext_sub_results: list,
         "audio_tracks_labeled": audio_tracks_labeled,
         "subtitle_tracks_labeled": subtitle_tracks_labeled,
         "external_subs_processed": ext_subs_processed,
+        "new_ext_subs": new_ext_subs,
     }
 
 
@@ -420,11 +422,13 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     all_video_results = []
     all_ext_sub_results = []
     total_ext_subs_found = 0
+    total_new_ext_subs = 0
     for d in config.path:
-        video_results, ext_sub_results, dir_ext_subs_found = detector.process_directory(d)
+        video_results, ext_sub_results, dir_ext_subs_found, dir_new_ext_subs = detector.process_directory(d)
         all_video_results.extend(video_results)
         all_ext_sub_results.extend(ext_sub_results)
         total_ext_subs_found += dir_ext_subs_found
+        total_new_ext_subs += dir_new_ext_subs
 
     # Save failed files for the web UI
     if config.use_tracking and not config.dry_run:
@@ -434,12 +438,14 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     runtime = time.time() - start
     print_detailed_summary(all_video_results, all_ext_sub_results,
                            config, runtime, detector,
-                           total_ext_subs_found=total_ext_subs_found)
+                           total_ext_subs_found=total_ext_subs_found,
+                           total_new_ext_subs=total_new_ext_subs)
 
     # Store run summary for the web UI status bar
     if state is not None:
         state.set_last_run_summary(
-            _build_run_summary(all_video_results, all_ext_sub_results, runtime)
+            _build_run_summary(all_video_results, all_ext_sub_results,
+                               runtime, total_new_ext_subs)
         )
 
 
