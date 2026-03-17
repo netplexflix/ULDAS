@@ -7,6 +7,7 @@ from flask import render_template, jsonify, request
 import uldas.webui as webui
 from uldas.tracking import ProcessingTracker
 from uldas.constants import VERSION
+from uldas.updater import get_update_status
 
 
 class _QuotedDumper(yaml.SafeDumper):
@@ -384,6 +385,12 @@ def register_routes(app, scheduler_state=None):
         granularity = request.args.get("granularity", "day")
         limit = request.args.get("limit", 30, type=int)
         return jsonify(tracker.get_time_series(granularity, limit))
+
+    # ── Update check API ──────────────────────────────────────────────────
+
+    @app.route("/api/update")
+    def get_update():
+        return jsonify(get_update_status())
 
     # ── Processing log API ────────────────────────────────────────────────
 

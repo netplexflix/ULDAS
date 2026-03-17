@@ -1016,6 +1016,8 @@ class MKVLanguageDetector:
                 audio_count = len(genuinely_detected)
                 if audio_count:
                     flags.append("audio_labeled")
+                if any(t["detected_language"] == "zxx" for t in results["processed_tracks"]):
+                    flags.append("silent_content")
             subtitle_count = 0
             sub_res = results.get("subtitle_results")
             if sub_res and sub_res.get("processed_subtitle_tracks"):

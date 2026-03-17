@@ -51,11 +51,14 @@ body {
     font-size: 18px;
     font-weight: 700;
     color: var(--text-primary);
-    margin-right: 32px;
     letter-spacing: 1.5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
 }
 
-.navbar-brand span {
+.navbar-brand > span:first-child {
     color: var(--accent);
     font-weight: 400;
     font-size: 12px;
@@ -63,7 +66,63 @@ body {
     vertical-align: middle;
 }
 
-.nav-links { display: flex; gap: 4px; }
+.version-status {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: 4px;
+}
+
+.version-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    flex-shrink: 0;
+    display: none;
+}
+
+.version-dot.up-to-date {
+    display: inline-block;
+    background: var(--success);
+    box-shadow: 0 0 6px var(--success);
+}
+
+.version-dot.update-available {
+    display: inline-block;
+    background: var(--warning);
+    box-shadow: 0 0 6px var(--warning);
+}
+
+.version-status-text {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    display: none;
+}
+
+.version-dot.up-to-date ~ .version-status-text,
+.version-dot.update-available ~ .version-status-text {
+    display: inline;
+}
+
+.version-dot.update-available ~ .version-status-text {
+    color: var(--warning);
+}
+
+.version-update-link {
+    color: var(--warning);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.nav-links {
+    display: flex;
+    gap: 4px;
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+}
 
 .nav-links a {
     color: var(--text-secondary);
@@ -363,6 +422,7 @@ select { min-width: 120px; }
 .filter-btn[data-flag="subtitle_labeled"].active { background: var(--accent); border-color: var(--accent); }
 .filter-btn[data-flag="external_subtitle"].active { background: var(--purple); border-color: var(--purple); }
 .filter-btn[data-flag="failed"].active { background: var(--danger); border-color: var(--danger); }
+.filter-btn[data-flag="silent_content"].active { background: var(--warning); border-color: var(--warning); color: #000; }
 
 .filter-btn .checkmark { margin-right: 4px; display: none; }
 .filter-btn.active .checkmark { display: inline; }
@@ -465,6 +525,8 @@ select { min-width: 120px; }
 .badge-cyan { background: rgba(57,210,192,0.15); color: var(--cyan); }
 .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
 .badge-red { background: rgba(248,81,73,0.15); color: var(--danger); }
+.badge-yellow { background: rgba(210,153,34,0.15); color: var(--warning); font-size: 13px; }
+.badge-warning-triangle { background: transparent; color: var(--warning); font-size: 16px; line-height: 1; }
 
 /* Empty state */
 .empty-state {
@@ -702,7 +764,7 @@ input[type="date"] { color-scheme: dark; }
 
 <!-- ── Navbar ──────────────────────────────────────────────────────────── -->
 <nav class="navbar">
-    <div class="navbar-brand">ULDAS <span>v{{ version }}</span></div>
+    <div class="navbar-brand">ULDAS <span>v{{ version }}</span><span class="version-status"><span class="version-dot" id="version-dot" title="Checking for updates..."></span><span class="version-status-text" id="version-status-text"></span></span></div>
     <div class="nav-links">
         <a href="#" data-page="dashboard" class="active">Dashboard</a>
         <a href="#" data-page="settings">Settings</a>
@@ -835,6 +897,7 @@ const logFilters = {
     subtitle_labeled: true,
     external_subtitle: true,
     failed: true,
+    silent_content: true,
 };
 
 /* ── Navigation ────────────────────────────────────────────────────────── */
@@ -1216,6 +1279,7 @@ const FLAG_META = {
     subtitle_labeled:   { label: 'Subtitles Labeled',  short: 'S',      badge: 'badge-blue' },
     external_subtitle:  { label: 'External Subtitle Labeled',  short: 'E',      badge: 'badge-purple' },
     failed:             { label: 'Failed',             short: 'F',      badge: 'badge-red' },
+    silent_content:     { label: 'Silent Content',     short: '\u26a0', badge: 'badge-warning-triangle' },
 };
 
 const LOG_PAGE_SIZE = 200;
@@ -1586,6 +1650,28 @@ async function schedulerStart() {
     }
 }
 
+/* ── Version update check ───────────────────────────────────────────────── */
+async function fetchUpdateStatus() {
+    try {
+        const res = await fetch('/api/update');
+        if (!res.ok) return;
+        const data = await res.json();
+        const dot = document.getElementById('version-dot');
+        const txt = document.getElementById('version-status-text');
+        if (data.status === 'up_to_date') {
+            dot.className = 'version-dot up-to-date';
+            dot.title = 'Up to date';
+            txt.textContent = 'up-to-date';
+        } else if (data.status === 'update_available') {
+            dot.className = 'version-dot update-available';
+            dot.title = `Update available: v${data.latest}`;
+            txt.innerHTML = `<a href="https://github.com/netplexflix/ULDAS/releases/latest" target="_blank" class="version-update-link">update available (v${data.latest})</a>`;
+        }
+    } catch (e) {
+        // silently ignore network errors for update check
+    }
+}
+
 /* ── Init ───────────────────────────────────────────────────────────────── */
 initLogFilters();
 initChartFilters();
@@ -1593,6 +1679,7 @@ fetchStats();
 fetchTimeSeries();
 fetchStatus();
 setInterval(fetchStatus, 3000);
+fetchUpdateStatus();
 </script>
 </body>
 </html>

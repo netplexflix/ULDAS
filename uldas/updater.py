@@ -40,3 +40,27 @@ def check_for_updates() -> None:
         print("Failed (network error)")
     except Exception:
         print("Failed (error)")
+
+
+def get_update_status() -> dict:
+    """Return update status as a dict for the web UI."""
+    try:
+        url = "https://api.github.com/repos/netplexflix/ULDAS/releases/latest"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        latest = resp.json().get("tag_name", "").lstrip("v")
+        if not latest:
+            return {"status": "unknown", "current": VERSION, "latest": None}
+        try:
+            update_available = pkg_version.parse(latest) > pkg_version.parse(VERSION)
+        except Exception:
+            update_available = latest != VERSION
+        return {
+            "status": "update_available" if update_available else "up_to_date",
+            "current": VERSION,
+            "latest": latest,
+        }
+    except requests.exceptions.RequestException:
+        return {"status": "error", "current": VERSION, "latest": None}
+    except Exception:
+        return {"status": "error", "current": VERSION, "latest": None}
