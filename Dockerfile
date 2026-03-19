@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ARG BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 
-LABEL org.opencontainers.image.title="ULDAS - Unified Language Detection and Subtitle Processing (NVIDIA GPU)"
+LABEL org.opencontainers.image.title="ULDAS - Unknown Language Detector for Audio and Subtitles (NVIDIA GPU)"
 LABEL org.opencontainers.image.description="ULDAS automatically detects and tags audio/subtitle languages in your media files using Whisper AI."
 LABEL org.opencontainers.image.authors="netplexflix"
 LABEL org.opencontainers.image.source="https://github.com/netplexflix/ULDAS"
