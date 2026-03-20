@@ -52,11 +52,18 @@ def get_update_status() -> dict:
         if not latest:
             return {"status": "unknown", "current": VERSION, "latest": None}
         try:
-            update_available = pkg_version.parse(latest) > pkg_version.parse(VERSION)
+            parsed_latest = pkg_version.parse(latest)
+            parsed_current = pkg_version.parse(VERSION)
+            if parsed_latest > parsed_current:
+                status = "update_available"
+            elif parsed_current > parsed_latest:
+                status = "develop"
+            else:
+                status = "up_to_date"
         except Exception:
-            update_available = latest != VERSION
+            status = "update_available" if latest != VERSION else "up_to_date"
         return {
-            "status": "update_available" if update_available else "up_to_date",
+            "status": status,
             "current": VERSION,
             "latest": latest,
         }
