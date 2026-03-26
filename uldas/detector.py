@@ -1025,11 +1025,19 @@ class MKVLanguageDetector:
                 flags.append("subtitle_labeled")
             if not flags:
                 flags.append("no_action_required")
+            track_details = results["processed_tracks"] or None
+            subtitle_details = None
+            if sub_res and sub_res.get("processed_subtitle_tracks"):
+                subtitle_details = sub_res["processed_subtitle_tracks"]
+            original_format = file_path.suffix if results["was_remuxed"] else None
             self.tracker.mark_processed(
                 mkv_path, audio_ok, subtitle_ok,
                 key=abs_key, flags=flags,
                 audio_tracks_labeled=audio_count,
                 subtitle_tracks_labeled=subtitle_count,
+                track_details=track_details,
+                subtitle_details=subtitle_details,
+                original_format=original_format,
             )
 
         # Clean up memory between files

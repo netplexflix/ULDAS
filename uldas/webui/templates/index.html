@@ -530,6 +530,48 @@ select { min-width: 120px; }
     cursor: default;
 }
 
+#badge-tooltip {
+    display: none;
+    position: fixed;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-primary);
+    white-space: nowrap;
+    z-index: 1000;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    line-height: 1.6;
+    text-align: left;
+}
+#badge-tooltip.visible {
+    display: block;
+}
+#badge-tooltip .tt-arrow {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+}
+#badge-tooltip.arrow-down .tt-arrow {
+    top: 100%;
+    border-top-color: var(--border);
+}
+#badge-tooltip.arrow-up .tt-arrow {
+    bottom: 100%;
+    border-bottom-color: var(--border);
+}
+#badge-tooltip .tt-lang {
+    color: var(--accent);
+    font-weight: 600;
+}
+#badge-tooltip .tt-dim {
+    color: var(--text-secondary);
+}
+
 .badge-gray { background: rgba(139,148,158,0.2); color: var(--text-secondary); }
 .badge-green { background: rgba(63,185,80,0.15); color: var(--success); }
 .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent); }
@@ -768,10 +810,283 @@ input[type="date"] { color-scheme: dark; }
     color: var(--text-primary);
     font-weight: 600;
 }
+
+/* ── Mobile responsiveness ───────────────────────────────────────────── */
+@media (max-width: 768px) {
+    /* Navbar: stack brand above nav links */
+    .navbar {
+        flex-wrap: wrap;
+        height: auto;
+        padding: 10px 16px;
+        gap: 4px;
+    }
+
+    .navbar-brand {
+        width: 100%;
+        justify-content: center;
+        font-size: 16px;
+    }
+
+    .nav-links {
+        position: static;
+        transform: none;
+        width: 100%;
+        justify-content: center;
+        gap: 2px;
+    }
+
+    .nav-links a {
+        padding: 6px 12px;
+        font-size: 13px;
+    }
+
+    /* Container */
+    .container {
+        padding: 16px 12px;
+    }
+
+    .page-title {
+        font-size: 20px;
+        margin-bottom: 16px;
+    }
+
+    /* Status bar: stack vertically */
+    .status-bar {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 12px 16px;
+        gap: 12px;
+    }
+
+    .status-bar-top {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .status-controls {
+        margin-left: 0;
+        justify-content: flex-start;
+    }
+
+    .last-run-summary {
+        border-left: none;
+        margin-left: 0;
+        padding-left: 0;
+        border-top: 1px solid var(--border);
+        padding-top: 12px;
+    }
+
+    .last-run-stats {
+        gap: 10px;
+    }
+
+    /* Dashboard toolbar */
+    .dashboard-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .date-range-picker {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    .date-range-picker select {
+        width: 100%;
+    }
+
+    #custom-date-range {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    #custom-date-range input[type="date"] {
+        flex: 1;
+        min-width: 0;
+    }
+
+    /* Stat cards: 2 per row, wrapping */
+    .stats-row {
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+
+    .stats-row .stat-card {
+        flex: 1 1 calc(50% - 5px);
+        min-width: calc(50% - 5px);
+    }
+
+    .stat-card {
+        padding: 14px;
+    }
+
+    .stat-value {
+        font-size: 22px;
+    }
+
+    .stat-label {
+        font-size: 12px;
+    }
+
+    /* Chart section */
+    .chart-section {
+        padding: 16px;
+    }
+
+    .chart-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+
+    .chart-controls {
+        flex-wrap: wrap;
+        gap: 10px;
+        width: 100%;
+    }
+
+    .chart-control {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .chart-control select,
+    .chart-control input[type="number"] {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .chart-container {
+        height: 220px;
+    }
+
+    .chart-filters {
+        gap: 6px;
+    }
+
+    .chart-filters .filter-btn {
+        padding: 4px 10px;
+        font-size: 11px;
+    }
+
+    /* Settings: stack label above control */
+    .settings-section {
+        padding: 16px;
+    }
+
+    .setting-item {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .setting-control {
+        width: 100%;
+    }
+
+    .path-list {
+        min-width: 0;
+        width: 100%;
+    }
+
+    .path-item input {
+        min-width: 0;
+    }
+
+    input[type="text"],
+    input[type="number"],
+    select {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .setting-control input[type="number"],
+    .setting-control select {
+        width: 100%;
+    }
+
+    /* Toggle controls should not stretch full width */
+    .setting-control .toggle {
+        width: 44px;
+    }
+
+    .settings-actions {
+        justify-content: stretch;
+    }
+
+    .settings-actions .btn {
+        width: 100%;
+    }
+
+    /* Processing Log */
+    .log-search-row {
+        flex-direction: column;
+    }
+
+    .log-filters {
+        gap: 6px;
+    }
+
+    .filter-btn {
+        padding: 5px 10px;
+        font-size: 11px;
+    }
+
+    /* Log table: horizontal scroll wrapper */
+    #log-content {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .log-table thead th {
+        position: static;
+    }
+
+    .log-table {
+        min-width: 600px;
+    }
+
+    .log-table td,
+    .log-table thead th {
+        padding: 8px 8px;
+        font-size: 12px;
+    }
+
+    /* Toast: full width on mobile */
+    .toast {
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+    }
+}
+
+@media (max-width: 480px) {
+    /* Single column stat cards on very small screens */
+    .stats-row .stat-card {
+        flex: 1 1 100%;
+        min-width: 100%;
+    }
+
+    .stat-value {
+        font-size: 20px;
+    }
+
+    .chart-container {
+        height: 180px;
+    }
+
+    .nav-links a {
+        padding: 5px 8px;
+        font-size: 12px;
+    }
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
+<div id="badge-tooltip"><span class="tt-arrow"></span></div>
 
 <!-- ── Navbar ──────────────────────────────────────────────────────────── -->
 <nav class="navbar">
@@ -1293,6 +1608,138 @@ const FLAG_META = {
     silent_content:     { label: 'Silent Content',     short: '\u26a0', badge: 'badge-warning-triangle' },
 };
 
+function buildTooltip(entry, flag) {
+    switch (flag) {
+        case 'remuxed':
+            if (entry.original_format)
+                return `Remuxed<br><span class="tt-dim">${entry.original_format}</span> → <span class="tt-lang">.mkv</span>`;
+            return 'Remuxed to MKV';
+        case 'audio_labeled':
+            if (entry.track_details && entry.track_details.length) {
+                const labeled = entry.track_details.filter(t => t.detected_language !== 'zxx');
+                if (labeled.length)
+                    return labeled.map(t =>
+                        `Track ${t.track_index}: <span class="tt-dim">${t.previous_language || 'und'}</span> → <span class="tt-lang">${t.detected_language}</span>`
+                    ).join('<br>');
+            }
+            const ac = entry.audio_tracks_labeled;
+            return ac ? `Audio: ${ac} track${ac !== 1 ? 's' : ''} labeled` : 'Audio Labeled';
+        case 'subtitle_labeled':
+            if (entry.subtitle_details && entry.subtitle_details.length) {
+                return entry.subtitle_details.map(t => {
+                    let line = `Track ${t.track_index}: <span class="tt-dim">${t.previous_language || 'und'}</span> → <span class="tt-lang">${t.detected_language}</span>`;
+                    const tags = [];
+                    if (t.is_sdh) tags.push('SDH');
+                    if (t.is_forced) tags.push('Forced');
+                    if (tags.length) line += ` <span class="tt-dim">[${tags.join(', ')}]</span>`;
+                    return line;
+                }).join('<br>');
+            }
+            const sc = entry.subtitle_tracks_labeled;
+            return sc ? `Subtitles: ${sc} track${sc !== 1 ? 's' : ''} labeled` : 'Subtitles Labeled';
+        case 'external_subtitle':
+            return entry.language_code
+                ? `Detected: <span class="tt-lang">${entry.language_code}</span>`
+                : 'External Subtitle Labeled';
+        case 'failed':
+            const parts = [];
+            if (entry.errors && entry.errors.length)
+                parts.push(...entry.errors.map(e => e.length > 80 ? e.slice(0, 77) + '…' : e));
+            if (entry.failed_tracks && entry.failed_tracks.length)
+                parts.push(`Failed tracks: ${entry.failed_tracks.join(', ')}`);
+            return parts.length ? parts.join('<br>') : 'Processing failed';
+        case 'silent_content':
+            if (entry.track_details && entry.track_details.length) {
+                const silent = entry.track_details.filter(t => t.detected_language === 'zxx');
+                if (silent.length)
+                    return silent.map(t => `Track ${t.track_index}: silent`).join('<br>');
+            }
+            return 'Silent content detected';
+        default:
+            return FLAG_META[flag]?.label || flag;
+    }
+}
+
+/* ── Floating tooltip logic (hover + tap-to-toggle) ───────────────────── */
+(function() {
+    const tip = document.getElementById('badge-tooltip');
+    let pinnedBadge = null;
+
+    function positionTip(badge) {
+        const rect = badge.getBoundingClientRect();
+        tip.classList.remove('arrow-down', 'arrow-up');
+
+        // Temporarily show offscreen to measure
+        tip.style.left = '-9999px';
+        tip.style.top = '0';
+        tip.classList.add('visible');
+        const tipH = tip.offsetHeight;
+        const tipW = tip.offsetWidth;
+        tip.classList.remove('visible');
+
+        // Prefer above; fall below if clipped
+        let top, arrowClass;
+        if (rect.top - tipH - 10 > 0) {
+            top = rect.top - tipH - 10;
+            arrowClass = 'arrow-down';
+        } else {
+            top = rect.bottom + 10;
+            arrowClass = 'arrow-up';
+        }
+
+        let left = rect.left + rect.width / 2 - tipW / 2;
+        left = Math.max(8, Math.min(left, window.innerWidth - tipW - 8));
+
+        tip.style.top = top + 'px';
+        tip.style.left = left + 'px';
+        tip.classList.add(arrowClass, 'visible');
+    }
+
+    function showTip(badge) {
+        const html = badge.getAttribute('data-tip');
+        if (!html) return;
+        tip.innerHTML = html + '<span class="tt-arrow"></span>';
+        positionTip(badge);
+    }
+
+    function hideTip() {
+        tip.classList.remove('visible', 'arrow-down', 'arrow-up');
+        pinnedBadge = null;
+    }
+
+    // Desktop: hover
+    document.addEventListener('mouseover', function(e) {
+        const badge = e.target.closest('.badge[data-tip]');
+        if (!badge || pinnedBadge) return;
+        showTip(badge);
+    });
+    document.addEventListener('mouseout', function(e) {
+        const badge = e.target.closest('.badge[data-tip]');
+        if (!badge || pinnedBadge) return;
+        hideTip();
+    });
+
+    // Mobile: tap to pin/unpin
+    document.addEventListener('click', function(e) {
+        const badge = e.target.closest('.badge[data-tip]');
+        if (badge) {
+            if (pinnedBadge === badge) {
+                hideTip();
+            } else {
+                pinnedBadge = badge;
+                showTip(badge);
+                tip.style.pointerEvents = 'auto';
+            }
+            return;
+        }
+        // Tap outside closes
+        if (pinnedBadge) {
+            hideTip();
+            tip.style.pointerEvents = 'none';
+        }
+    });
+})();
+
 const LOG_PAGE_SIZE = 200;
 let logFiltered = [];
 let logRenderedCount = 0;
@@ -1429,7 +1876,9 @@ function loadMoreRows() {
             : '';
         const flags = (entry.flags || []).map(f => {
             const meta = FLAG_META[f];
-            return meta ? `<span class="badge ${meta.badge}" title="${meta.label}">${meta.short}</span>` : '';
+            if (!meta) return '';
+            const tip = buildTooltip(entry, f);
+            return `<span class="badge ${meta.badge}" data-tip="${tip.replace(/"/g, '&quot;')}">${meta.short}</span>`;
         }).join(' ');
 
         tr.innerHTML =

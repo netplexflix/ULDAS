@@ -319,6 +319,9 @@ class ProcessingTracker:
         flags: list = None,
         audio_tracks_labeled: int = 0,
         subtitle_tracks_labeled: int = 0,
+        track_details: list = None,
+        subtitle_details: list = None,
+        original_format: str = None,
     ) -> None:
         if not (audio_success or subtitle_success):
             return
@@ -329,7 +332,7 @@ class ProcessingTracker:
         except OSError:
             logger.warning("Cannot stat file for tracking: %s", file_path)
             return
-        self.data[key] = {
+        entry = {
             "size": stat.st_size,
             "mtime": stat.st_mtime,
             "audio_processed": audio_success,
@@ -340,6 +343,13 @@ class ProcessingTracker:
             "audio_tracks_labeled": audio_tracks_labeled,
             "subtitle_tracks_labeled": subtitle_tracks_labeled,
         }
+        if track_details:
+            entry["track_details"] = track_details
+        if subtitle_details:
+            entry["subtitle_details"] = subtitle_details
+        if original_format:
+            entry["original_format"] = original_format
+        self.data[key] = entry
         self._dirty = True
         self._save()
 
@@ -711,6 +721,11 @@ class ProcessingTracker:
                 "subtitle_processed": entry.get("subtitle_processed", False),
                 "type": entry.get("type"),
                 "language_code": entry.get("language_code"),
+                "track_details": entry.get("track_details"),
+                "subtitle_details": entry.get("subtitle_details"),
+                "original_format": entry.get("original_format"),
+                "audio_tracks_labeled": entry.get("audio_tracks_labeled", 0),
+                "subtitle_tracks_labeled": entry.get("subtitle_tracks_labeled", 0),
             })
 
         if migrated:
