@@ -9,7 +9,7 @@ import time
 import threading
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import Callable, List, Dict, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
@@ -46,10 +46,21 @@ def _flush_all_logs() -> None:
 class MKVLanguageDetector:
     """Scans directories, detects languages, and updates MKV metadata."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config,
+                 cancel_check: Optional[Callable[[], bool]] = None):
         setup_cpu_limits()
         self.config = config
         self.deletion_failures: list[dict] = []
+        self._cancel_check = cancel_check
+        self._cancel_logged = False
+
+        # Per-file metadata caches, cleared at the start of each
+        # process_file() call.  ffprobe/mkvmerge are expensive enough
+        # that memoizing within a file's processing lifetime is worth
+        # it — several code paths query the same metadata.
+        self._mkv_info_cache: Dict[str, Dict] = {}
+        self._duration_cache: Dict[str, float] = {}
+        self._format_lang_cache: Dict[str, Dict[int, str]] = {}
 
         # ── Tracking ─────────────────────────────────────────────────────
         if config.use_tracking:
@@ -82,6 +93,19 @@ class MKVLanguageDetector:
 
         if not self.mkvmerge:
             logger.warning("mkvmerge not found – language detection may be less accurate")
+
+    # ── Cancellation ─────────────────────────────────────────────────────
+    def _should_cancel(self) -> bool:
+        """Check whether a graceful cancel has been requested."""
+        try:
+            if self._cancel_check is not None and self._cancel_check():
+                if not self._cancel_logged:
+                    logger.info("Cancellation requested — stopping after current file")
+                    self._cancel_logged = True
+                return True
+        except Exception:
+            pass
+        return False
 
     # ── Whisper init (with fallback) ─────────────────────────────────────
     def _init_whisper(self, device, compute_type, cpu_threads):
@@ -139,126 +163,66 @@ class MKVLanguageDetector:
             return self.config.compute_type
         return "float16" if device == "cuda" else "int8"
 
-    # ── File discovery ───────────────────────────────────────────────────
-    def find_video_files(self, directory: str) -> List[Path]:
-        """Walk *directory*, returning only video files that need processing."""
-        exts: set[str] = {".mkv"}
-        if self.config.remux_to_mkv:
-            exts.update(VIDEO_EXTENSIONS)
+    # ── Unified directory scan ───────────────────────────────────────────
+    def _scan_tree(self, directory: str) -> tuple[list[Path], list[Path], int, int, int, int]:
+        """Walk *directory* once, collecting both video and external
+        subtitle files in a single pass.
 
-        use_fast_skip = (
-            self.config.use_tracking
-            and hasattr(self, "tracker")
+        Returns
+        -------
+        (video_files, subtitle_files, video_skipped, sub_skipped,
+         new_already_labeled, dirs_scanned)
+
+        Also populates ``self._last_scan_seen_paths`` — the set of
+        absolute paths of **all** video and subtitle files observed in
+        *directory*, before any fast-skip filtering.  This set is used
+        by ``prune_missing_files`` to drop stale tracker entries without
+        issuing any extra filesystem calls.
+        """
+        video_exts: set[str] = {".mkv"}
+        if self.config.remux_to_mkv:
+            video_exts.update(VIDEO_EXTENSIONS)
+        sub_exts = EXTERNAL_SUBTITLE_EXTENSIONS
+
+        scan_subs = self.config.process_external_subtitles
+
+        use_tracking = self.config.use_tracking and hasattr(self, "tracker")
+        use_fast_skip_video = (
+            use_tracking
             and not self.config.force_reprocess
             and not self.config.reprocess_all
             and not self.config.reprocess_all_subtitles
         )
-        tracked_keys: set[str] = set()
-        if use_fast_skip:
-            tracked_keys = self.tracker.get_fully_processed_keys(
-                process_subtitles=self.config.process_subtitles,
-            )
-        all_files: List[Path] = []
-        skipped_in_scan = 0
-        dirs_scanned = 0
-        last_report = time.monotonic()
-        report_interval = 5.0
-
-        if self.config.show_details:
-            logger.info("Scanning directory tree: %s for video files (extensions: %s)",
-                        directory, ", ".join(sorted(exts)))
-        else:
-            print(f"Scanning directory tree: {directory} for video files", flush=True)
-
-        try:
-            for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
-                dirs_scanned += 1
-
-                for filename in filenames:
-                    dot_pos = filename.rfind(".")
-                    if dot_pos <= 0:
-                        continue
-                    if filename[dot_pos:].lower() not in exts:
-                        continue
-
-                    full_path_str = os.path.join(dirpath, filename)
-
-                    if use_fast_skip:
-                        abs_path_str = os.path.abspath(full_path_str)
-                        if abs_path_str in tracked_keys:
-                            skipped_in_scan += 1
-                            continue
-
-                    all_files.append(Path(full_path_str))
-
-                now = time.monotonic()
-                if now - last_report >= report_interval and self.config.show_details:
-                    last_report = now
-                    if use_fast_skip:
-                        logger.info(
-                            "Scanning... %d dirs, %d new files, %d skipped (cached)",
-                            dirs_scanned, len(all_files), skipped_in_scan,
-                        )
-                    else:
-                        logger.info(
-                            "Scanning... %d dirs, %d video files found",
-                            dirs_scanned, len(all_files),
-                        )
-
-        except PermissionError as exc:
-            logger.warning("Permission denied during scan: %s", exc)
-        except Exception as exc:
-            logger.error("Error during directory scan: %s", exc)
-
-        if self.config.show_details:
-            if use_fast_skip:
-                logger.info(
-                    "Scan complete: %d dirs, %d new files to check, %d skipped (cached)",
-                    dirs_scanned, len(all_files), skipped_in_scan,
-                )
-            else:
-                logger.info(
-                    "Scan complete: %d dirs, %d video files found",
-                    dirs_scanned, len(all_files),
-                )
-        else:
-            if use_fast_skip:
-                print(
-                    f"\rScan complete: {dirs_scanned} dirs, "
-                    f"{len(all_files)} new files, "
-                    f"{skipped_in_scan} skipped (already processed)          ",
-                )
-            else:
-                print(
-                    f"\rScan complete: {dirs_scanned} dirs, "
-                    f"{len(all_files)} video files found          ",
-                )
-
-        return all_files
-
-    # ── External subtitle file discovery ─────────────────────────────────
-    def find_external_subtitle_files(self, directory: str) -> tuple[List[Path], int, int]:
-        use_tracking = (
-            self.config.use_tracking
-            and hasattr(self, "tracker")
-        )
-        use_fast_skip = (
+        use_fast_skip_sub = (
             use_tracking
             and not self.config.force_reprocess
             and not self.config.reprocess_all_subtitles
         )
 
-        all_files: List[Path] = []
-        skipped_in_scan = 0
+        tracked_video_keys: set[str] = set()
+        if use_fast_skip_video:
+            tracked_video_keys = self.tracker.get_fully_processed_keys(
+                process_subtitles=self.config.process_subtitles,
+            )
+
+        video_files: list[Path] = []
+        sub_files: list[Path] = []
+        seen_paths: set[str] = set()
+
+        video_skipped = 0
+        sub_skipped = 0
         new_already_labeled = 0
         dirs_scanned = 0
         last_report = time.monotonic()
         report_interval = 5.0
 
         if self.config.show_details:
-            logger.info("Scanning directory tree: %s for subtitle files", directory)
+            logger.info(
+                "Scanning directory tree: %s (video exts: %s)",
+                directory, ", ".join(sorted(video_exts)),
+            )
         else:
-            print(f"Scanning directory tree: {directory} for subtitle files", flush=True)
+            print(f"Scanning directory tree: {directory}", flush=True)
 
         try:
             for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
@@ -268,70 +232,95 @@ class MKVLanguageDetector:
                     dot_pos = filename.rfind(".")
                     if dot_pos <= 0:
                         continue
-                    if filename[dot_pos:].lower() not in EXTERNAL_SUBTITLE_EXTENSIONS:
+                    ext = filename[dot_pos:].lower()
+
+                    is_video = ext in video_exts
+                    is_sub = scan_subs and ext in sub_exts
+                    if not (is_video or is_sub):
                         continue
 
+                    if self.config.ignore_tags:
+                        stem_lower = filename[:dot_pos].lower()
+                        if any(tag and tag.lower() in stem_lower
+                               for tag in self.config.ignore_tags):
+                            if is_video:
+                                video_skipped += 1
+                            else:
+                                sub_skipped += 1
+                            continue
+
                     full_path_str = os.path.join(dirpath, filename)
+                    abs_path_str = os.path.abspath(full_path_str)
+                    seen_paths.add(abs_path_str)
 
-                    # Fast skip via tracker (already processed in a prior run)
-                    sub_path = Path(full_path_str)
-                    if use_fast_skip:
-                        if self.tracker.is_external_subtitle_tracked(sub_path):
-                            skipped_in_scan += 1
+                    if is_video:
+                        if use_fast_skip_video and abs_path_str in tracked_video_keys:
+                            video_skipped += 1
                             continue
-
-                    # Skip files that already have a language tag unless
-                    # reprocess_all_subtitles is set.
-                    # These are NEW files (not in tracker) that don't need
-                    # processing — count them separately.
-                    if not self.config.reprocess_all_subtitles:
-                        lang_tag = ext_sub_mod.get_language_tag(sub_path)
-                        if lang_tag is not None:
-                            # New file that already has a language tag —
-                            # track it as no_action_required so the
-                            # dashboard counts it, then skip processing.
-                            if use_tracking and not self.config.dry_run:
-                                self.tracker.mark_external_subtitle_tracked(
-                                    sub_path, language_code=lang_tag,
-                                )
-                            new_already_labeled += 1
+                        video_files.append(Path(full_path_str))
+                    else:  # is_sub
+                        sub_path = Path(full_path_str)
+                        if use_fast_skip_sub and self.tracker.is_external_subtitle_tracked(sub_path):
+                            sub_skipped += 1
                             continue
-
-                    all_files.append(sub_path)
+                        if not self.config.reprocess_all_subtitles:
+                            lang_tag = ext_sub_mod.get_language_tag(sub_path)
+                            if lang_tag is not None:
+                                if use_tracking and not self.config.dry_run:
+                                    self.tracker.mark_external_subtitle_tracked(
+                                        sub_path, language_code=lang_tag,
+                                    )
+                                new_already_labeled += 1
+                                continue
+                        sub_files.append(sub_path)
 
                 now = time.monotonic()
                 if now - last_report >= report_interval and self.config.show_details:
                     last_report = now
                     logger.info(
-                        "Scanning subtitles... %d dirs, %d new files, %d skipped",
-                        dirs_scanned, len(all_files) + new_already_labeled,
-                        skipped_in_scan,
+                        "Scanning... %d dirs, %d new videos, %d skipped, "
+                        "%d new subs, %d sub-skipped",
+                        dirs_scanned, len(video_files), video_skipped,
+                        len(sub_files) + new_already_labeled, sub_skipped,
                     )
 
         except PermissionError as exc:
-            logger.warning("Permission denied during subtitle scan: %s", exc)
+            logger.warning("Permission denied during scan: %s", exc)
         except Exception as exc:
-            logger.error("Error during subtitle scan: %s", exc)
+            logger.error("Error during directory scan: %s", exc)
 
-        # Flush tracked no_action_required entries to disk
+        # Flush tracked no_action_required entries (only on dirty; batched)
         if use_tracking and not self.config.dry_run:
             self.tracker.save_ext_sub_if_dirty()
 
-        total_found = len(all_files) + new_already_labeled + skipped_in_scan
-        total_new = len(all_files) + new_already_labeled
+        # Stash the seen-set so prune_missing_files can skip redundant I/O.
+        self._last_scan_seen_paths = seen_paths
 
         if self.config.show_details:
             logger.info(
-                "Subtitle scan complete: %d dirs, %d new files, %d skipped",
-                dirs_scanned, total_new, skipped_in_scan,
+                "Scan complete: %d dirs, %d new videos (%d skipped), "
+                "%d new subs (%d skipped, %d already labeled)",
+                dirs_scanned, len(video_files), video_skipped,
+                len(sub_files), sub_skipped, new_already_labeled,
             )
         else:
-            print(
-                f"Subtitle scan complete: {total_new} new subtitle files, "
-                f"{skipped_in_scan} skipped",
-            )
+            parts = [
+                f"{dirs_scanned} dirs",
+                f"{len(video_files)} new videos",
+            ]
+            if video_skipped:
+                parts.append(f"{video_skipped} skipped")
+            if scan_subs:
+                parts.append(f"{len(sub_files) + new_already_labeled} new subs")
+                if sub_skipped:
+                    parts.append(f"{sub_skipped} sub-skipped")
+            print("\rScan complete: " + ", ".join(parts) + "          ")
 
-        return all_files, total_found, total_new
+        return (
+            video_files, sub_files,
+            video_skipped, sub_skipped,
+            new_already_labeled, dirs_scanned,
+        )
 
     # ── Remux ────────────────────────────────────────────────────────────
     def remux_to_mkv(self, file_path: Path) -> Optional[Path]:
@@ -485,17 +474,50 @@ class MKVLanguageDetector:
 
     # ── MKV info ─────────────────────────────────────────────────────────
     def get_mkv_info(self, file_path: Path) -> Dict:
+        cache_key = str(file_path)
+        cached = self._mkv_info_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         mkvmerge = find_executable("mkvmerge")
         if not mkvmerge:
-            return self._get_mkv_info_ffprobe(file_path)
-        try:
-            cmd = [mkvmerge, "-J", str(file_path)]
-            r = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                               encoding="utf-8", errors="replace")
-            data = json.loads(r.stdout)
-            return self._convert_mkvmerge_to_ffprobe(data)
-        except Exception:
-            return self._get_mkv_info_ffprobe(file_path)
+            info = self._get_mkv_info_ffprobe(file_path)
+        else:
+            try:
+                cmd = [mkvmerge, "-J", str(file_path)]
+                r = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                   encoding="utf-8", errors="replace")
+                data = json.loads(r.stdout)
+                info = self._convert_mkvmerge_to_ffprobe(data)
+            except Exception:
+                info = self._get_mkv_info_ffprobe(file_path)
+
+        self._mkv_info_cache[cache_key] = info
+        return info
+
+    def get_file_duration(self, file_path: Path) -> float:
+        """Return duration in seconds, memoized per file."""
+        cache_key = str(file_path)
+        cached = self._duration_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        duration = audio_mod._get_file_duration(
+            self.ffprobe, file_path, self.config.show_details,
+        )
+        self._duration_cache[cache_key] = duration
+        return duration
+
+    def _invalidate_file_caches(self, *paths: Path) -> None:
+        """Drop cached metadata for *paths*.  Called at the end of
+        process_file() and after remuxing, when a file's metadata
+        is no longer needed or when the file has been replaced."""
+        for p in paths:
+            if p is None:
+                continue
+            key = str(p)
+            self._mkv_info_cache.pop(key, None)
+            self._duration_cache.pop(key, None)
+            self._format_lang_cache.pop(key, None)
 
     def _convert_mkvmerge_to_ffprobe(self, data: dict) -> dict:
         type_map = {"video": "video", "audio": "audio", "subtitles": "subtitle"}
@@ -529,6 +551,11 @@ class MKVLanguageDetector:
 
     def _read_format_audio_langs(self, file_path: Path) -> Dict[int, str]:
         """Read audio language tags from format-level metadata (e.g. AVI IAS tags)."""
+        cache_key = str(file_path)
+        cached = self._format_lang_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         from uldas.constants import LANGUAGE_CODES
         try:
             cmd = [self.ffprobe, "-v", "quiet", "-print_format", "json",
@@ -537,6 +564,7 @@ class MKVLanguageDetector:
                                encoding="utf-8", errors="replace")
             tags = json.loads(r.stdout).get("format", {}).get("tags", {})
         except Exception:
+            self._format_lang_cache[cache_key] = {}
             return {}
         result: Dict[int, str] = {}
         for key, value in tags.items():
@@ -549,6 +577,7 @@ class MKVLanguageDetector:
             code = LANGUAGE_CODES.get(value.lower().strip())
             if code:
                 result[idx] = normalize_language_code(code)
+        self._format_lang_cache[cache_key] = result
         return result
 
     # ── Track finders ────────────────────────────────────────────────────
@@ -775,8 +804,7 @@ class MKVLanguageDetector:
         if not subs:
             return False
 
-        from uldas.audio import _get_file_duration
-        duration = _get_file_duration(self.ffprobe, file_path, self.config.show_details)
+        duration = self.get_file_duration(file_path)
         if duration <= 0:
             return False
 
@@ -905,6 +933,9 @@ class MKVLanguageDetector:
             mkv_path = self.remux_to_mkv(file_path)
             if mkv_path and mkv_path != file_path:
                 results["was_remuxed"] = True
+                # Original file is gone/remuxed — its cached metadata
+                # no longer applies.
+                self._invalidate_file_caches(file_path)
                 # Re-apply any audio language tags that were lost in remux
                 for _aidx, _lang in original_audio_langs.items():
                     try:
@@ -1043,6 +1074,9 @@ class MKVLanguageDetector:
         # Clean up memory between files
         audio_mod._cleanup_cuda_memory()
 
+        # Drop per-file metadata caches so they don't grow unbounded.
+        self._invalidate_file_caches(file_path, mkv_path)
+
         return results
 
     # ── Process directory ────────────────────────────────────────────────
@@ -1052,34 +1086,55 @@ class MKVLanguageDetector:
         total_ext_subs_found = 0
         new_ext_subs = 0
 
-        # Prune tracker entries for files that no longer exist in this dir
-        if self.config.use_tracking and hasattr(self, "tracker"):
-            pruned = self.tracker.prune_missing_files(directory)
-            if pruned and self.config.show_details:
-                logger.info("Pruned %d orphaned tracker entries", pruned)
+        if self._should_cancel():
+            return video_results, ext_sub_results, total_ext_subs_found, new_ext_subs
 
-        # ── Video files ──────────────────────────────────────────────────
-        video_files = self.find_video_files(directory)
+        try:
+            # ── Unified scan (videos + external subtitles in one walk) ──
+            (
+                video_files, ext_sub_files,
+                _video_skipped, sub_skipped,
+                new_already_labeled, _dirs,
+            ) = self._scan_tree(directory)
 
-        if not video_files:
-            if self.config.show_details:
-                logger.info("No new video files found in: %s", directory)
-            else:
-                print(f"No new video files found in: {directory}")
-        else:
-            video_results = self._process_video_files(video_files)
+            total_ext_subs_found = len(ext_sub_files) + new_already_labeled + sub_skipped
+            new_ext_subs = len(ext_sub_files) + new_already_labeled
 
-        # ── External subtitle files (independent scan) ───────────────────
-        if self.config.process_external_subtitles:
-            ext_sub_files, total_ext_subs_found, new_ext_subs = self.find_external_subtitle_files(directory)
+            # Prune tracker entries for files that no longer exist in this
+            # directory.  The scan already collected every on-disk path in
+            # self._last_scan_seen_paths, so the tracker doesn't need to
+            # re-stat every key.
+            if self.config.use_tracking and hasattr(self, "tracker"):
+                pruned = self.tracker.prune_missing_files(
+                    directory,
+                    seen_paths=getattr(self, "_last_scan_seen_paths", None),
+                )
+                if pruned and self.config.show_details:
+                    logger.info("Pruned %d orphaned tracker entries", pruned)
 
-            if not ext_sub_files:
+            if not video_files:
                 if self.config.show_details:
-                    logger.info("No new external subtitle files found in: %s", directory)
+                    logger.info("No new video files found in: %s", directory)
                 else:
-                    print(f"No new external subtitle files found in: {directory}")
+                    print(f"No new video files found in: {directory}")
             else:
-                ext_sub_results = self._process_ext_sub_files(ext_sub_files)
+                video_results = self._process_video_files(video_files)
+
+            # ── External subtitle files ──────────────────────────────────
+            if self.config.process_external_subtitles:
+                if not ext_sub_files:
+                    if self.config.show_details:
+                        logger.info("No new external subtitle files found in: %s", directory)
+                    else:
+                        print(f"No new external subtitle files found in: {directory}")
+                else:
+                    ext_sub_results = self._process_ext_sub_files(ext_sub_files)
+        finally:
+            # Flush any pending tracker changes for this directory.
+            # Writes are batched per-directory for performance; this
+            # also runs on exceptions so partial progress is saved.
+            if self.config.use_tracking and hasattr(self, "tracker"):
+                self.tracker.save_if_dirty()
 
         return video_results, ext_sub_results, total_ext_subs_found, new_ext_subs
 
@@ -1140,7 +1195,10 @@ class MKVLanguageDetector:
             return results
 
         action_total = len(actionable)
+        checkpoint_every = 25  # flush tracker to disk every N files
         for action_idx, fp in enumerate(actionable, 1):
+            if self._should_cancel():
+                break
             try:
                 if self.config.show_details:
                     logger.info("[%d/%d] Processing: %s",
@@ -1162,6 +1220,11 @@ class MKVLanguageDetector:
                     "skipped_due_to_tracking": False,
                 })
 
+            if (action_idx % checkpoint_every == 0
+                    and self.config.use_tracking
+                    and hasattr(self, "tracker")):
+                self.tracker.save_if_dirty()
+
         return results
 
     def _process_ext_sub_files(self, ext_sub_files: List[Path]) -> List[Dict]:
@@ -1170,6 +1233,8 @@ class MKVLanguageDetector:
         total = len(ext_sub_files)
 
         for idx, sub_path in enumerate(ext_sub_files, 1):
+            if self._should_cancel():
+                break
             try:
                 if self.config.show_details:
                     logger.info("[%d/%d] Processing subtitle: %s",

@@ -275,7 +275,6 @@ class ProcessingTracker:
             for key in removals:
                 self.data.pop(key, None)
             self._dirty = True
-            self._save()
 
         return actionable, skipped, key_cache
 
@@ -292,14 +291,12 @@ class ProcessingTracker:
         except OSError:
             del self.data[key]
             self._dirty = True
-            self._save()
             return False
 
         if (entry.get("size") != stat.st_size
                 or abs(entry.get("mtime", 0) - stat.st_mtime) > 1):
             del self.data[key]
             self._dirty = True
-            self._save()
             return False
 
         return True
@@ -351,7 +348,6 @@ class ProcessingTracker:
             entry["original_format"] = original_format
         self.data[key] = entry
         self._dirty = True
-        self._save()
 
     # ── External subtitle tracking ───────────────────────────────────────
     def is_external_subtitle_processed(self, subtitle_path: Path) -> bool:
@@ -368,14 +364,12 @@ class ProcessingTracker:
         except OSError:
             del self.ext_sub_data[key]
             self._ext_sub_dirty = True
-            self._save_ext_sub()
             return False
 
         if (entry.get("size") != stat.st_size
                 or abs(entry.get("mtime", 0) - stat.st_mtime) > 1):
             del self.ext_sub_data[key]
             self._ext_sub_dirty = True
-            self._save_ext_sub()
             return False
 
         return True
@@ -392,14 +386,12 @@ class ProcessingTracker:
         except OSError:
             del self.ext_sub_data[key]
             self._ext_sub_dirty = True
-            self._save_ext_sub()
             return False
 
         if (entry.get("size") != stat.st_size
                 or abs(entry.get("mtime", 0) - stat.st_mtime) > 1):
             del self.ext_sub_data[key]
             self._ext_sub_dirty = True
-            self._save_ext_sub()
             return False
 
         return True
@@ -461,37 +453,44 @@ class ProcessingTracker:
             if old_key in self.ext_sub_data:
                 del self.ext_sub_data[old_key]
         self._ext_sub_dirty = True
-        self._save_ext_sub()
 
-    def prune_missing_files(self, directory: str = None) -> int:
+    def prune_missing_files(
+        self,
+        directory: str = None,
+        seen_paths: "Optional[set[str]]" = None,
+    ) -> int:
         """Remove entries for files that no longer exist on disk.
 
         If *directory* is given, only entries under that directory are
         checked — this avoids accidentally pruning entries on drives
         that happen to be offline.
+
+        If *seen_paths* is provided, it is taken as the authoritative
+        set of absolute paths present on disk in *directory* (as
+        collected during a recent ``os.walk``).  Tracker entries whose
+        keys are absent from this set are pruned without any extra
+        filesystem calls — much faster than ``os.path.exists`` per key.
         """
         prefix = os.path.abspath(directory) if directory else None
-        removals = [
-            key for key in self.data
-            if (not prefix or key.startswith(prefix))
-            and not os.path.exists(key)
-        ]
+
+        def _missing(key: str) -> bool:
+            if prefix and not key.startswith(prefix):
+                return False
+            if seen_paths is not None:
+                return key not in seen_paths
+            return not os.path.exists(key)
+
+        removals = [key for key in self.data if _missing(key)]
         if removals:
             for key in removals:
                 del self.data[key]
             self._dirty = True
-            self._save()
 
-        ext_removals = [
-            key for key in self.ext_sub_data
-            if (not prefix or key.startswith(prefix))
-            and not os.path.exists(key)
-        ]
+        ext_removals = [key for key in self.ext_sub_data if _missing(key)]
         if ext_removals:
             for key in ext_removals:
                 del self.ext_sub_data[key]
             self._ext_sub_dirty = True
-            self._save_ext_sub()
 
         return len(removals) + len(ext_removals)
 
@@ -500,11 +499,10 @@ class ProcessingTracker:
         if key in self.data:
             del self.data[key]
             self._dirty = True
-            self._save()
         if key in self.ext_sub_data:
             del self.ext_sub_data[key]
             self._ext_sub_dirty = True
-            self._save_ext_sub()
+        self.save_if_dirty()
 
     def clear_all(self) -> None:
         self.data = {}
@@ -730,7 +728,7 @@ class ProcessingTracker:
 
         if migrated:
             self._dirty = True
-            self._save()
+            self.save_if_dirty()
 
         # Include external subtitle entries from the dedicated JSON
         for key, entry in self.ext_sub_data.items():

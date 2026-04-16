@@ -28,7 +28,8 @@ def start_webui(config_path: str = "config/config.yml",
         return
 
     template_dir = os.path.join(os.path.dirname(__file__), "templates")
-    app = Flask(__name__, template_folder=template_dir)
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 
     from uldas.webui.routes import register_routes
     register_routes(app, scheduler_state=scheduler_state)

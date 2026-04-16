@@ -1,6 +1,9 @@
 path:
   - /folder1
   - /folder2
+ignore_tags:
+  - -trailer
+  - sample
 remux_to_mkv: true
 show_details: false
 dry_run: false

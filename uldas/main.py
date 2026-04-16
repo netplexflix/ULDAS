@@ -402,7 +402,8 @@ def _run_processing(config: Config, skip_update_check: bool = False,
             logger.info("Loading faster-whisper model: %s", config.whisper_model)
         else:
             print(f"Loading faster-whisper model: {config.whisper_model}")
-        detector = MKVLanguageDetector(config)
+        cancel_check = state.is_stopped if state is not None else None
+        detector = MKVLanguageDetector(config, cancel_check=cancel_check)
     except RuntimeError as exc:
         msg = f"Failed to initialise detector: {exc}"
         logger.error(msg)
@@ -423,12 +424,19 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     all_ext_sub_results = []
     total_ext_subs_found = 0
     total_new_ext_subs = 0
-    for d in config.path:
-        video_results, ext_sub_results, dir_ext_subs_found, dir_new_ext_subs = detector.process_directory(d)
-        all_video_results.extend(video_results)
-        all_ext_sub_results.extend(ext_sub_results)
-        total_ext_subs_found += dir_ext_subs_found
-        total_new_ext_subs += dir_new_ext_subs
+    try:
+        for d in config.path:
+            if state is not None and state.is_stopped():
+                break
+            video_results, ext_sub_results, dir_ext_subs_found, dir_new_ext_subs = detector.process_directory(d)
+            all_video_results.extend(video_results)
+            all_ext_sub_results.extend(ext_sub_results)
+            total_ext_subs_found += dir_ext_subs_found
+            total_new_ext_subs += dir_new_ext_subs
+    finally:
+        # Final flush of batched tracker writes, even on exception.
+        if config.use_tracking and hasattr(detector, "tracker"):
+            detector.tracker.save_if_dirty()
 
     # Save failed files for the web UI
     if config.use_tracking and not config.dry_run:
@@ -513,14 +521,31 @@ def main() -> None:
     except Exception as exc:
         logger.debug("Web UI not started: %s", exc)
 
-    # ── CRON scheduling (Docker) ─────────────────────────────────────────
-    from uldas.scheduler import get_cron_schedule, run_on_schedule
+    # ── Scheduling (Docker) ──────────────────────────────────────────────
+    # Scheduled mode is activated when:
+    #   1. config.yml has a schedule_type key (persisted by a previous run), or
+    #   2. CRON / CRON_SCHEDULE / SCHEDULE_HOURS env var is set.
+    # In all other cases, a single processing run is executed and the
+    # process exits (preserving the historical CLI behavior).
+    from uldas.scheduler import _load_initial_schedule, run_on_schedule
 
-    cron = get_cron_schedule()
-    if cron:
-        print(f"CRON scheduling enabled: {cron}")
+    import yaml as _yaml
+    _cfg_has_schedule = False
+    try:
+        with open(args.config, "r", encoding="utf-8") as _fh:
+            _raw = _yaml.safe_load(_fh) or {}
+        _cfg_has_schedule = bool(_raw.get("schedule_type"))
+    except Exception:
+        pass
+
+    _env_has_schedule = any(
+        os.environ.get(k, "").strip()
+        for k in ("CRON", "CRON_SCHEDULE", "SCHEDULE_HOURS")
+    )
+
+    if _cfg_has_schedule or _env_has_schedule:
+        _load_initial_schedule(sched_state, args.config)
         run_on_schedule(
-            cron,
             lambda: _run_processing(config, skip_update_check=args.skip_update_check,
                                     state=sched_state, config_path=args.config),
             state=sched_state,

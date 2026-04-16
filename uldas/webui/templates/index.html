@@ -58,12 +58,29 @@ body {
     flex-shrink: 0;
 }
 
-.navbar-brand > span:first-child {
+.navbar-brand > span:first-of-type {
     color: var(--accent);
     font-weight: 400;
     font-size: 12px;
     margin-left: 8px;
     vertical-align: middle;
+}
+
+.github-link {
+    display: flex;
+    align-items: center;
+    line-height: 0;
+}
+
+.github-logo {
+    height: 20px;
+    width: auto;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.github-logo:hover {
+    opacity: 1;
 }
 
 .version-status {
@@ -730,6 +747,12 @@ input[type="date"] { color-scheme: dark; }
     box-shadow: 0 0 6px var(--warning);
 }
 
+.status-dot.stopping {
+    background: var(--warning);
+    box-shadow: 0 0 8px var(--warning);
+    animation: status-pulse 1.5s ease-in-out infinite;
+}
+
 .status-dot.error {
     background: var(--danger);
     box-shadow: 0 0 6px var(--danger);
@@ -1090,7 +1113,7 @@ input[type="date"] { color-scheme: dark; }
 
 <!-- ── Navbar ──────────────────────────────────────────────────────────── -->
 <nav class="navbar">
-    <div class="navbar-brand">ULDAS <span>v{{ version }}</span><span class="version-status"><span class="version-dot" id="version-dot" title="Checking for updates..."></span><span class="version-status-text" id="version-status-text"></span></span></div>
+    <div class="navbar-brand">ULDAS <a href="https://github.com/netplexflix/ULDAS/" target="_blank" rel="noopener noreferrer" class="github-link"><img src="{{ url_for('static', filename='github_logo.png') }}" alt="GitHub" class="github-logo"></a><span>v{{ version }}</span><span class="version-status"><span class="version-dot" id="version-dot" title="Checking for updates..."></span><span class="version-status-text" id="version-status-text"></span></span></div>
     <div class="nav-links">
         <a href="#" data-page="dashboard" class="active">Dashboard</a>
         <a href="#" data-page="settings">Settings</a>
@@ -1173,6 +1196,10 @@ input[type="date"] { color-scheme: dark; }
     <div class="settings-section" id="basic-settings">
         <h2>General</h2>
         <div id="basic-options"></div>
+    </div>
+    <div class="settings-section" id="scheduler-settings">
+        <h2>Scheduler</h2>
+        <div id="scheduler-options"></div>
     </div>
     <div class="advanced-toggle">
         <label class="toggle">
@@ -1477,13 +1504,50 @@ async function fetchConfig() {
 function renderSettings() {
     const basic = document.getElementById('basic-options');
     const advanced = document.getElementById('advanced-options');
+    const scheduler = document.getElementById('scheduler-options');
     basic.innerHTML = '';
     advanced.innerHTML = '';
+    if (scheduler) scheduler.innerHTML = '';
 
     configOptions.forEach(opt => {
         const el = createSettingItem(opt);
-        (opt.advanced ? advanced : basic).appendChild(el);
+        if (opt.section === 'scheduler' && scheduler) {
+            scheduler.appendChild(el);
+        } else if (opt.advanced) {
+            advanced.appendChild(el);
+        } else {
+            basic.appendChild(el);
+        }
     });
+
+    updateSchedulerFieldState();
+    const typeSel = document.querySelector('#scheduler-options [data-key="schedule_type"]');
+    if (typeSel) {
+        typeSel.addEventListener('change', updateSchedulerFieldState);
+    }
+}
+
+function updateSchedulerFieldState() {
+    const scope = document.getElementById('scheduler-options');
+    if (!scope) return;
+    const typeSel = scope.querySelector('[data-key="schedule_type"]');
+    if (!typeSel) return;
+    const mode = typeSel.value;
+    const hoursInput = scope.querySelector('[data-key="schedule_hours"]');
+    const cronInput = scope.querySelector('[data-key="schedule_cron"]');
+    const hoursItem = hoursInput ? hoursInput.closest('.setting-item') : null;
+    const cronItem = cronInput ? cronInput.closest('.setting-item') : null;
+    if (mode === 'cron') {
+        if (hoursInput) hoursInput.disabled = true;
+        if (cronInput) cronInput.disabled = false;
+        if (hoursItem) hoursItem.style.opacity = '0.5';
+        if (cronItem) cronItem.style.opacity = '1';
+    } else {
+        if (hoursInput) hoursInput.disabled = false;
+        if (cronInput) cronInput.disabled = true;
+        if (hoursItem) hoursItem.style.opacity = '1';
+        if (cronItem) cronItem.style.opacity = '0.5';
+    }
 }
 
 function createSettingItem(opt) {
@@ -1525,6 +1589,18 @@ function createSettingItem(opt) {
             ${items}
             <button class="btn-icon" onclick="addPath(this)" title="Add path">+</button>
         </div>`;
+    } else if (opt.type === 'string_list') {
+        const vals = Array.isArray(opt.value) ? opt.value : (opt.value ? [opt.value] : []);
+        const placeholder = opt.placeholder || '';
+        const items = vals.map((v, i) => `
+            <div class="path-item">
+                <input type="text" data-key="${opt.key}" data-idx="${i}" value="${v}" placeholder="${placeholder}">
+                <button class="btn-icon danger" onclick="removeListItem(this)" title="Remove">&times;</button>
+            </div>`).join('');
+        ctrl.innerHTML = `<div class="path-list" data-key="${opt.key}" data-placeholder="${placeholder}">
+            ${items}
+            <button class="btn-icon" onclick="addListItem(this)" title="Add">+</button>
+        </div>`;
     }
 
     return div;
@@ -1551,6 +1627,25 @@ function removePath(btn) {
     }
 }
 
+function addListItem(btn) {
+    const list = btn.parentElement;
+    const key = list.dataset.key;
+    const placeholder = list.dataset.placeholder || '';
+    const items = list.querySelectorAll('.path-item');
+    const idx = items.length;
+    const div = document.createElement('div');
+    div.className = 'path-item';
+    div.innerHTML = `
+        <input type="text" data-key="${key}" data-idx="${idx}" value="" placeholder="${placeholder}">
+        <button class="btn-icon danger" onclick="removeListItem(this)" title="Remove">&times;</button>`;
+    list.insertBefore(div, btn);
+}
+
+function removeListItem(btn) {
+    const item = btn.parentElement;
+    item.remove();
+}
+
 async function saveConfig() {
     const data = {};
 
@@ -1572,6 +1667,11 @@ async function saveConfig() {
             const paths = [];
             els.forEach(el => { if (el.value.trim()) paths.push(el.value.trim()); });
             data[opt.key] = paths.length ? paths : opt.default;
+        } else if (opt.type === 'string_list') {
+            const els = document.querySelectorAll(`[data-key="${opt.key}"][data-idx]`);
+            const vals = [];
+            els.forEach(el => { if (el.value.trim()) vals.push(el.value.trim()); });
+            data[opt.key] = vals;
         }
     });
 
@@ -1582,8 +1682,9 @@ async function saveConfig() {
             body: JSON.stringify(data),
         });
         const result = await res.json();
-        if (result.status === 'ok') {
+        if (res.ok && result.status === 'ok') {
             showToast('Settings saved successfully', 'success');
+            if (typeof fetchStatus === 'function') fetchStatus();
         } else {
             showToast('Error saving settings: ' + (result.message || 'Unknown'), 'error');
         }
@@ -1984,6 +2085,15 @@ function updateStatusUI(data) {
             btnRunNow.disabled = true;
             btnStop.style.display = '';
             btnStop.textContent = 'Stop';
+            btnStop.disabled = false;
+            btnStart.style.display = 'none';
+            break;
+        case 'stopping':
+            text.textContent = 'Stopping \u2014 finishing current file...';
+            btnRunNow.disabled = true;
+            btnStop.style.display = '';
+            btnStop.textContent = 'Stopping...';
+            btnStop.disabled = true;
             btnStart.style.display = 'none';
             break;
         case 'idle':
@@ -1996,12 +2106,14 @@ function updateStatusUI(data) {
             btnRunNow.disabled = false;
             btnStop.style.display = '';
             btnStop.textContent = 'Stop';
+            btnStop.disabled = false;
             btnStart.style.display = 'none';
             break;
         case 'stopped':
             text.textContent = 'Stopped by user';
             btnRunNow.disabled = false;
             btnStop.style.display = 'none';
+            btnStop.disabled = false;
             btnStart.style.display = '';
             break;
         case 'error':
@@ -2009,6 +2121,7 @@ function updateStatusUI(data) {
             btnRunNow.disabled = false;
             btnStop.style.display = '';
             btnStop.textContent = 'Stop';
+            btnStop.disabled = false;
             btnStart.style.display = 'none';
             break;
         default:

@@ -1,6 +1,7 @@
 #file: uldas/webui/routes.py
 
 import os
+import threading
 import yaml
 from flask import render_template, jsonify, request
 
@@ -8,6 +9,58 @@ import uldas.webui as webui
 from uldas.tracking import ProcessingTracker
 from uldas.constants import VERSION
 from uldas.updater import get_update_status
+
+
+# ── Tracker cache ────────────────────────────────────────────────────────
+# Re-parsing the JSON tracking files on every API request is wasteful,
+# especially with the dashboard polling.  Cache a single read-only
+# tracker and invalidate it when the underlying files change on disk.
+_tracker_cache_lock = threading.Lock()
+_tracker_cache: "dict[str, object]" = {
+    "tracker": None,
+    "config_dir": None,
+    "mtimes": (),
+}
+
+
+def _file_mtimes(config_dir: str) -> tuple:
+    """Snapshot of the mtimes that influence tracker state.
+
+    Files that don't exist contribute ``0.0`` so their later creation
+    still shows up as a change.
+    """
+    names = (
+        "processed_files.json",
+        "processed_external_subtitles.json",
+        "failed_files.json",
+    )
+    out = []
+    for name in names:
+        try:
+            out.append(os.path.getmtime(os.path.join(config_dir, name)))
+        except OSError:
+            out.append(0.0)
+    return tuple(out)
+
+
+def _get_cached_tracker(config_dir: str) -> ProcessingTracker:
+    """Return a cached read-only ProcessingTracker for *config_dir*.
+
+    Reuses the existing instance if the tracking files haven't been
+    modified since the last load.  Thread-safe — Flask serves API
+    requests from a thread pool.
+    """
+    with _tracker_cache_lock:
+        current_mtimes = _file_mtimes(config_dir)
+        if (_tracker_cache["tracker"] is not None
+                and _tracker_cache["config_dir"] == config_dir
+                and _tracker_cache["mtimes"] == current_mtimes):
+            return _tracker_cache["tracker"]
+        tracker = ProcessingTracker(config_dir, read_only=True)
+        _tracker_cache["tracker"] = tracker
+        _tracker_cache["config_dir"] = config_dir
+        _tracker_cache["mtimes"] = current_mtimes
+        return tracker
 
 
 class _QuotedDumper(yaml.SafeDumper):
@@ -26,6 +79,32 @@ _QuotedDumper.add_representer(str, _quoted_str)
 # whether it is an advanced option.
 
 CONFIG_OPTIONS = [
+    # ── Scheduler ─────────────────────────────────────────────────────────
+    {
+        "key": "schedule_type",
+        "type": "select",
+        "default": "cron",
+        "label": "Schedule Type",
+        "description": "Choose between a simple hours interval or a CRON expression.",
+        "options": ["hours", "cron"],
+        "section": "scheduler",
+    },
+    {
+        "key": "schedule_hours",
+        "type": "int",
+        "default": 24,
+        "label": "Hours Interval",
+        "description": "Run every X hours (used when Schedule Type is 'hours').",
+        "section": "scheduler",
+    },
+    {
+        "key": "schedule_cron",
+        "type": "string",
+        "default": "0 5 * * 5",
+        "label": "CRON Expression",
+        "description": "Standard 5-field CRON expression. See crontab.guru for help.",
+        "section": "scheduler",
+    },
     # ── Basic options ─────────────────────────────────────────────────────
     {
         "key": "path",
@@ -33,6 +112,15 @@ CONFIG_OPTIONS = [
         "default": ["."],
         "label": "Scan Directories",
         "description": "Directories to scan for video files. Add one or more paths to your media libraries.",
+        "advanced": False,
+    },
+    {
+        "key": "ignore_tags",
+        "type": "string_list",
+        "default": [],
+        "label": "Ignore Tags",
+        "description": "Skip any file whose name contains one of these substrings (case-insensitive). Useful for excluding trailers, samples, featurettes, etc. Examples: -trailer, sample",
+        "placeholder": "-trailer",
         "advanced": False,
     },
     {
@@ -284,10 +372,13 @@ def register_routes(app, scheduler_state=None):
         if scheduler_state is None:
             return jsonify({"status": "error",
                             "message": "No scheduler active (not in CRON mode)"}), 404
+        was_running = scheduler_state.status == "running"
+        if was_running:
+            scheduler_state.set_status("stopping", "Cancelling current run...")
         scheduler_state.request_stop()
         note = ""
-        if scheduler_state.status == "running":
-            note = "Current processing run will complete before the scheduler stops"
+        if was_running:
+            note = "Stopping after the current file finishes processing..."
         return jsonify({"status": "ok", "message": "Scheduler stopped",
                         "note": note})
 
@@ -336,8 +427,38 @@ def register_routes(app, scheduler_state=None):
 
     @app.route("/api/config", methods=["POST"])
     def save_config():
-        new_values = request.get_json()
+        new_values = request.get_json() or {}
         config_path = webui._config_path
+
+        # ── Validate scheduler fields BEFORE writing config ───────────
+        if "schedule_type" in new_values or "schedule_hours" in new_values or "schedule_cron" in new_values:
+            sched_type = (new_values.get("schedule_type") or "cron").strip().lower()
+            if sched_type not in ("hours", "cron"):
+                return jsonify({"status": "error",
+                                "message": f"Invalid schedule_type: {sched_type}"}), 400
+            new_values["schedule_type"] = sched_type
+
+            try:
+                sched_hours = int(new_values.get("schedule_hours", 24))
+            except (TypeError, ValueError):
+                return jsonify({"status": "error",
+                                "message": "schedule_hours must be an integer"}), 400
+            if sched_hours < 1:
+                sched_hours = 1
+            new_values["schedule_hours"] = sched_hours
+
+            sched_cron = (new_values.get("schedule_cron") or "").strip()
+            new_values["schedule_cron"] = sched_cron
+
+            if sched_type == "cron":
+                try:
+                    from croniter import croniter
+                except ImportError:
+                    return jsonify({"status": "error",
+                                    "message": "croniter package is not installed"}), 500
+                if not croniter.is_valid(sched_cron):
+                    return jsonify({"status": "error",
+                                    "message": f"Invalid CRON expression: {sched_cron}"}), 400
 
         # Preserve any extra keys not managed by the UI
         existing = {}
@@ -358,15 +479,30 @@ def register_routes(app, scheduler_state=None):
             with open(config_path, "w", encoding="utf-8") as fh:
                 yaml.dump(existing, fh, Dumper=_QuotedDumper,
                           default_flow_style=False, sort_keys=False)
-            return jsonify({"status": "ok"})
         except Exception as exc:
             return jsonify({"status": "error", "message": str(exc)}), 500
+
+        # ── Signal scheduler of live schedule change ──────────────────
+        if webui._scheduler_state is not None and (
+            "schedule_type" in new_values
+            or "schedule_hours" in new_values
+            or "schedule_cron" in new_values
+        ):
+            ok, err = webui._scheduler_state.update_schedule(
+                existing.get("schedule_type", "cron"),
+                int(existing.get("schedule_hours", 24)),
+                existing.get("schedule_cron", "") or "",
+            )
+            if not ok:
+                return jsonify({"status": "error", "message": err}), 400
+
+        return jsonify({"status": "ok"})
 
     # ── Stats API ─────────────────────────────────────────────────────────
 
     @app.route("/api/stats")
     def get_stats():
-        tracker = ProcessingTracker(webui._config_dir, read_only=True)
+        tracker = _get_cached_tracker(webui._config_dir)
 
         start = request.args.get("start", type=float)
         end = request.args.get("end", type=float)
@@ -381,7 +517,7 @@ def register_routes(app, scheduler_state=None):
 
     @app.route("/api/stats/timeseries")
     def get_timeseries():
-        tracker = ProcessingTracker(webui._config_dir, read_only=True)
+        tracker = _get_cached_tracker(webui._config_dir)
         granularity = request.args.get("granularity", "day")
         limit = request.args.get("limit", 30, type=int)
         return jsonify(tracker.get_time_series(granularity, limit))
@@ -396,7 +532,7 @@ def register_routes(app, scheduler_state=None):
 
     @app.route("/api/log")
     def get_log():
-        tracker = ProcessingTracker(webui._config_dir, read_only=True)
+        tracker = _get_cached_tracker(webui._config_dir)
         entries = tracker.get_log_entries()
         failed = tracker.load_failed_files()
 

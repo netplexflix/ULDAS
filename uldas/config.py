@@ -12,11 +12,17 @@ class Config:
     def __init__(self):
         # ── Paths & general ──────────────────────────────────────────────
         self.path: list[str] = ["."]
+        self.ignore_tags: list[str] = []
         self.remux_to_mkv: bool = False
         self.show_details: bool = True
         self.whisper_model: str = "base"
         self.dry_run: bool = False
         self.temp_dir: str = ""
+
+        # ── Scheduler ────────────────────────────────────────────────────
+        self.schedule_type: str = "cron"  # 'hours' | 'cron'
+        self.schedule_hours: int = 24
+        self.schedule_cron: str = "0 5 * * 5"
 
         # ── VAD ──────────────────────────────────────────────────────────
         self.vad_filter: bool = True
@@ -85,6 +91,7 @@ class Config:
     def create_sample_config(self, config_path: str = "config/config.yml") -> None:
         sample = {
             "path": ["P:/Movies", "P:/TV"],
+            "ignore_tags": [],
             "remux_to_mkv": True,
             "show_details": False,
             "whisper_model": "small",

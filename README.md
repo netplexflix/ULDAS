@@ -91,8 +91,14 @@ services:
       # Examples:
       #   "0 3 * * *"    = every day at 3:00 AM
       #   "0 */6 * * *"  = every 6 hours
-      #   "0 5 * * 5"   = every Friday at 5:00 AM
-      # Leave empty or remove to run once and exit.
+      #   "0 5 * * 5"    = every Friday at 5:00 AM
+      # Alternative: use a simple hours interval instead of cron:
+      # - SCHEDULE_HOURS=24
+      # Leave all scheduler env vars empty or remove them to run once and exit.
+      #
+      # NOTE: CRON_SCHEDULE / SCHEDULE_HOURS are only used as initial defaults
+      # on first launch. Once saved to config.yml they can be edited live from
+      # the webUI Settings page (Scheduler section) without a container restart.
     ports:
       - "2119:2119"
     volumes:
@@ -131,6 +137,7 @@ services:
 > The format is: `your-actual-path:container-path`<br>
 
 - **Update the CRON Schedule** Tip: [Crontab.Guru](https://crontab.guru/)
+  - `CRON_SCHEDULE` (and `SCHEDULE_HOURS`) are only consulted on first start. After that, edit the schedule live from the webUI Settings page → **Scheduler** section (between General and Advanced). You can switch between a simple hours interval and a CRON expression without restarting the container.
 - **Update port to xxxx:2119** if you want to run the webUI on a different port than 2119.
 
 <a id="step-4-create-config"></a>
@@ -171,6 +178,7 @@ ULDAS is available in Community Applications. Search for "ULDAS" or install manu
 Rename `config.example.yml` to `config.yml` and change the values where needed:
 
 - **path**: Main Paths for your media.
+- **ignore_tags**: List of substrings. Any file whose name contains one of these (case-insensitive, matched against the name without extension) is skipped. Useful for trailers, samples, featurettes. Example: `[-trailer, sample]`
 - **remux_to_mkv**: `true` remuxes non-MKV files so they can be processed too
 - **show_details**: `true` will show you more details of what's happening
 - **dry_run**: `true` will do a dry run (will show what it would do, without actually altering any files)

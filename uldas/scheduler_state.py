@@ -23,12 +23,15 @@ class SchedulerState:
         self._config_dir = config_dir
 
         # Current state
-        self._status: str = "idle"          # running | idle | stopped | error
+        self._status: str = "idle"          # running | stopping | idle | stopped | error
         self._error_message: str = ""
         self._next_run_time: Optional[datetime] = None
         self._last_run_time: Optional[datetime] = None
         self._cron_expression: Optional[str] = None
         self._has_cron: bool = False
+        self._has_schedule: bool = False
+        self._schedule_type: str = "cron"   # 'hours' | 'cron'
+        self._schedule_hours: int = 24
         self._started_at: Optional[datetime] = None
         self._last_run_summary: Optional[dict] = None
 
@@ -36,6 +39,7 @@ class SchedulerState:
         self._wake_event = threading.Event()
         self._run_requested = threading.Event()
         self._stop_requested = threading.Event()
+        self._schedule_changed = threading.Event()
 
     # ── Getters ───────────────────────────────────────────────────────────
 
@@ -66,6 +70,9 @@ class SchedulerState:
                 "started_at": started_at_iso,
                 "cron_expression": self._cron_expression,
                 "has_cron": self._has_cron,
+                "has_schedule": self._has_schedule,
+                "schedule_type": self._schedule_type,
+                "schedule_hours": self._schedule_hours,
                 "error_message": self._error_message,
                 "last_run_summary": self._last_run_summary,
             }
@@ -99,6 +106,60 @@ class SchedulerState:
         with self._lock:
             self._cron_expression = expression
             self._has_cron = True
+            self._has_schedule = True
+            self._schedule_type = "cron"
+
+    # ── Schedule management ──────────────────────────────────────────────
+
+    def get_schedule(self) -> tuple:
+        """Return a thread-safe snapshot: (schedule_type, schedule_hours, cron_expression)."""
+        with self._lock:
+            return (self._schedule_type, self._schedule_hours, self._cron_expression or "")
+
+    def update_schedule(self, schedule_type: str, hours: int, cron_expr: str) -> tuple:
+        """Update the active schedule and signal the scheduler loop.
+
+        Returns (ok: bool, error: str).
+        """
+        schedule_type = (schedule_type or "").strip().lower()
+        if schedule_type not in ("hours", "cron"):
+            return (False, f"Invalid schedule_type: {schedule_type}")
+
+        if schedule_type == "hours":
+            try:
+                hours = int(hours)
+            except (TypeError, ValueError):
+                return (False, "schedule_hours must be an integer")
+            if hours < 1:
+                return (False, "schedule_hours must be >= 1")
+            cron_expr = ""
+        else:
+            cron_expr = (cron_expr or "").strip()
+            try:
+                from croniter import croniter
+            except ImportError:
+                return (False, "croniter package is not installed")
+            if not croniter.is_valid(cron_expr):
+                return (False, f"Invalid cron expression: {cron_expr}")
+
+        with self._lock:
+            self._schedule_type = schedule_type
+            if schedule_type == "hours":
+                self._schedule_hours = hours
+            else:
+                self._cron_expression = cron_expr
+            self._has_cron = (schedule_type == "cron")
+            self._has_schedule = True
+
+        self._schedule_changed.set()
+        self._wake_event.set()
+        return (True, "")
+
+    def is_schedule_changed(self) -> bool:
+        return self._schedule_changed.is_set()
+
+    def clear_schedule_changed(self) -> None:
+        self._schedule_changed.clear()
 
     def set_last_run_summary(self, summary: dict) -> None:
         with self._lock:

@@ -1,12 +1,8 @@
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-ARG BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-
-LABEL org.opencontainers.image.title="ULDAS - Unknown Language Detector for Audio and Subtitles (NVIDIA GPU)"
-LABEL org.opencontainers.image.description="ULDAS automatically detects and tags audio/subtitle languages in your media files using Whisper AI."
-LABEL org.opencontainers.image.authors="netplexflix"
+LABEL maintainer="netplexflix"
+LABEL description="ULDAS - Unified Language Detection and Subtitle Processing (NVIDIA GPU)"
 LABEL org.opencontainers.image.source="https://github.com/netplexflix/ULDAS"
-LABEL org.opencontainers.image.created="$BUILD_DATE"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -51,10 +47,7 @@ RUN pip install av
 
 # Install remaining Python dependencies
 COPY requirements.txt .
-RUN pip install faster-whisper>=1.2.0 && \
-    pip install PyYAML>=6.0.2 requests>=2.32.4 packaging>=21.3 \
-    psutil>=7.0.0 langdetect>=1.0.8 pytesseract>=0.3.13 pillow>=11.3.0 \
-    flask>=3.0.0
+RUN pip install -r requirements.txt
 
 # Copy application code
 COPY ULDAS.py .
@@ -71,7 +64,6 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV PUID=0
 ENV PGID=0
-ENV BUILD_DATE=$BUILD_DATE
 
 EXPOSE 2119
 
