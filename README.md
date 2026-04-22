@@ -138,6 +138,7 @@ services:
 
 - **Update the CRON Schedule** Tip: [Crontab.Guru](https://crontab.guru/)
   - `CRON_SCHEDULE` (and `SCHEDULE_HOURS`) are only consulted on first start. After that, edit the schedule live from the webUI Settings page → **Scheduler** section (between General and Advanced). You can switch between a simple hours interval and a CRON expression without restarting the container.
+  - By default ULDAS does **not** run immediately when the container starts — it waits for the next scheduled time (or a manual **Run Now** from the dashboard), so you have a chance to review your settings in the webUI first. If you prefer ULDAS to start processing as soon as the container is up, enable **Run on Startup** in the webUI Settings → **Scheduler** section (or set `run_on_startup: true` in `config.yml`).
 - **Update port to xxxx:2119** if you want to run the webUI on a different port than 2119.
 
 <a id="step-4-create-config"></a>
@@ -182,6 +183,7 @@ Rename `config.example.yml` to `config.yml` and change the values where needed:
 - **remux_to_mkv**: `true` remuxes non-MKV files so they can be processed too
 - **show_details**: `true` will show you more details of what's happening
 - **dry_run**: `true` will do a dry run (will show what it would do, without actually altering any files)
+- **run_on_startup**: `false` (default) — ULDAS will not run immediately when the container starts, giving you time to review settings in the webUI first. Set to `true` to run straight away on container start; subsequent runs then follow the configured schedule in either case.
 - **process_subtitles**: `true` will process undefined subtitle tracks
 - **process_external_subtitles**: `true` will process external subtitle files
 - **analyze_forced_subtitles**: `true` will analyze whether a subtitle track has "Forced Subtitles" or not

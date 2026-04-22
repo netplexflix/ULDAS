@@ -23,6 +23,7 @@ class Config:
         self.schedule_type: str = "cron"  # 'hours' | 'cron'
         self.schedule_hours: int = 24
         self.schedule_cron: str = "0 5 * * 5"
+        self.run_on_startup: bool = False
 
         # ── VAD ──────────────────────────────────────────────────────────
         self.vad_filter: bool = True
@@ -95,7 +96,7 @@ class Config:
             "remux_to_mkv": True,
             "show_details": False,
             "whisper_model": "small",
-            "dry_run": False,
+            "dry_run": True,
             "temp_dir": "",
             "vad_filter": True,
             "vad_min_speech_duration_ms": 250,

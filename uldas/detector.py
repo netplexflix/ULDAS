@@ -64,7 +64,10 @@ class MKVLanguageDetector:
 
         # ── Tracking ─────────────────────────────────────────────────────
         if config.use_tracking:
-            self.tracker = ProcessingTracker("config")
+            # Dry-run uses a read-only tracker so scan/prune/reader side
+            # effects never hit disk — the dashboard's All Time badges
+            # must not move during a preview.
+            self.tracker = ProcessingTracker("config", read_only=config.dry_run)
             if config.force_reprocess:
                 logger.info("Force reprocess enabled – ignoring tracking cache")
 
@@ -1103,8 +1106,10 @@ class MKVLanguageDetector:
             # Prune tracker entries for files that no longer exist in this
             # directory.  The scan already collected every on-disk path in
             # self._last_scan_seen_paths, so the tracker doesn't need to
-            # re-stat every key.
-            if self.config.use_tracking and hasattr(self, "tracker"):
+            # re-stat every key.  Skipped on dry_run so a preview can't
+            # remove entries.
+            if (self.config.use_tracking and hasattr(self, "tracker")
+                    and not self.config.dry_run):
                 pruned = self.tracker.prune_missing_files(
                     directory,
                     seen_paths=getattr(self, "_last_scan_seen_paths", None),

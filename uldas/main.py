@@ -40,6 +40,27 @@ def _setup_signal_handlers() -> None:
             pass
 
 
+def _tune_third_party_logging(show_details: bool) -> None:
+    """Silence noisy third-party loggers unless the user asked for details.
+
+    huggingface_hub emits an 'unauthenticated requests' advisory when no
+    HF_TOKEN is set. The Whisper models we use are public, so the warning
+    is noise — hide it unless show_details is on.
+    """
+    import warnings
+    if show_details:
+        return
+    try:
+        from huggingface_hub.utils import logging as hf_logging
+        hf_logging.set_verbosity_error()
+    except Exception:
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*unauthenticated requests to the HF Hub.*",
+    )
+
+
 def _apply_temp_dir(config: Config) -> None:
     """Override the global tempfile directory if configured."""
     temp_dir = config.temp_dir
@@ -357,6 +378,8 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     # Reload config from disk so web UI settings changes take effect
     config.load_from_file(config_path)
 
+    _tune_third_party_logging(config.show_details)
+
     # Apply temp_dir setting
     _apply_temp_dir(config)
 
@@ -451,10 +474,10 @@ def _run_processing(config: Config, skip_update_check: bool = False,
 
     # Store run summary for the web UI status bar
     if state is not None:
-        state.set_last_run_summary(
-            _build_run_summary(all_video_results, all_ext_sub_results,
-                               runtime, total_new_ext_subs)
-        )
+        summary = _build_run_summary(all_video_results, all_ext_sub_results,
+                                     runtime, total_new_ext_subs)
+        summary["dry_run"] = bool(config.dry_run)
+        state.set_last_run_summary(summary)
 
 
 def main() -> None:
@@ -549,6 +572,7 @@ def main() -> None:
             lambda: _run_processing(config, skip_update_check=args.skip_update_check,
                                     state=sched_state, config_path=args.config),
             state=sched_state,
+            run_on_startup=config.run_on_startup,
         )
         # run_on_schedule never returns
     else:

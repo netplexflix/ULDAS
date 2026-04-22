@@ -122,7 +122,8 @@ def _load_initial_schedule(state, config_path: str) -> None:
         state.clear_schedule_changed()
 
 
-def run_on_schedule(run_fn: Callable, state=None) -> None:
+def run_on_schedule(run_fn: Callable, state=None,
+                    run_on_startup: bool = True) -> None:
     """
     Execute run_fn immediately, then re-execute on the configured schedule.
     Blocks forever (designed for Docker entrypoint use).
@@ -130,27 +131,39 @@ def run_on_schedule(run_fn: Callable, state=None) -> None:
     The active schedule (hours-interval or cron) is pulled fresh from *state*
     on every loop iteration, so live edits from the Web UI take effect on the
     next pass without a container restart.
+
+    When *run_on_startup* is False, the initial immediate run is skipped —
+    useful if the user wants to review settings in the Web UI before the
+    first processing run happens.
     """
     from croniter import croniter
 
     # Run immediately on start
-    print("=" * 60)
-    print("ULDAS – Initial run on container start")
-    print("=" * 60)
-    if state is not None:
-        state.set_status("running")
-    try:
-        run_fn()
+    if run_on_startup:
+        print("=" * 60)
+        print("ULDAS – Initial run on container start")
+        print("=" * 60)
         if state is not None:
-            state.set_last_run(datetime.now())
-            if state.status != "error":
-                state.set_status("idle")
-    except Exception as e:
-        logger.error("Initial run failed: %s", e)
-        print("The Web UI remains available — fix your config and trigger a new run.")
+            state.set_status("running")
+        try:
+            run_fn()
+            if state is not None:
+                state.set_last_run(datetime.now())
+                if state.status != "error":
+                    state.set_status("idle")
+        except Exception as e:
+            logger.error("Initial run failed: %s", e)
+            print("The Web UI remains available — fix your config and trigger a new run.")
+            if state is not None:
+                state.set_status("error", str(e))
+                state.set_last_run(datetime.now())
+    else:
+        print("=" * 60)
+        print("ULDAS – Startup run disabled (run_on_startup=false)")
+        print("Open the Web UI to adjust settings, then click 'Run Now' to start.")
+        print("=" * 60)
         if state is not None:
-            state.set_status("error", str(e))
-            state.set_last_run(datetime.now())
+            state.set_status("idle")
 
     # Schedule loop
     while True:

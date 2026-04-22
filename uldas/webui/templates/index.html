@@ -809,6 +809,11 @@ input[type="date"] { color-scheme: dark; }
     padding-left: 20px;
 }
 
+.last-run-summary.dry-run {
+    border-left-color: var(--warning);
+    border-left-width: 3px;
+}
+
 .last-run-label {
     font-size: 11px;
     font-weight: 600;
@@ -816,6 +821,10 @@ input[type="date"] { color-scheme: dark; }
     letter-spacing: 0.5px;
     color: var(--text-secondary);
     margin-bottom: 6px;
+}
+
+.last-run-summary.dry-run .last-run-label {
+    color: var(--warning);
 }
 
 .last-run-stats {
@@ -2137,6 +2146,9 @@ function updateStatusUI(data) {
     const statsDiv = document.getElementById('last-run-stats');
     const s = data.last_run_summary;
     if (s) {
+        const isDry = !!s.dry_run;
+        summaryDiv.classList.toggle('dry-run', isDry);
+
         const parts = [];
         if (s.runtime_seconds != null) {
             const m = Math.floor(s.runtime_seconds / 60);
@@ -2161,17 +2173,24 @@ function updateStatusUI(data) {
         if (s.files_skipped)
             parts.push('<span class="last-run-stat">Skipped (already tracked): <strong>' + s.files_skipped + '</strong></span>');
 
+        const prefix = isDry ? 'Last run (DRY RUN PREVIEW) — ' : 'Last run — ';
+        const labelEl = document.querySelector('.last-run-label');
         if (data.last_run_time) {
             const timeStr = data.last_run_time.substring(11, 16);
             const dateStr = data.last_run_time.substring(0, 10);
             const today = new Date().toISOString().substring(0, 10);
             const label = dateStr === today ? 'Today at ' + timeStr : dateStr + ' ' + timeStr;
-            document.querySelector('.last-run-label').textContent = 'Last run \u2014 ' + label;
+            labelEl.textContent = prefix + label;
+        } else if (isDry) {
+            labelEl.textContent = 'Last run (DRY RUN PREVIEW)';
+        } else {
+            labelEl.textContent = 'Last run';
         }
 
         statsDiv.innerHTML = parts.join('');
         summaryDiv.style.display = '';
     } else {
+        summaryDiv.classList.remove('dry-run');
         summaryDiv.style.display = 'none';
     }
 }

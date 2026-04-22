@@ -105,6 +105,14 @@ CONFIG_OPTIONS = [
         "description": "Standard 5-field CRON expression. See crontab.guru for help.",
         "section": "scheduler",
     },
+    {
+        "key": "run_on_startup",
+        "type": "bool",
+        "default": False,
+        "label": "Run on Startup",
+        "description": "Run immediately when the container starts. Disabled by default so you can review settings in the Web UI first; enable if you want ULDAS to start processing as soon as the container is up.",
+        "section": "scheduler",
+    },
     # ── Basic options ─────────────────────────────────────────────────────
     {
         "key": "path",

@@ -1,6 +1,6 @@
 #file: uldas/constants.py
 
-VERSION = "2026.04.15"
+VERSION = "2026.04.22"
 
 # ── Language name → ISO 639-2 (bibliographic) ────────────────────────────
 LANGUAGE_CODES: dict[str, str] = {
