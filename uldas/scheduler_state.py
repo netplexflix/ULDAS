@@ -201,6 +201,8 @@ class SchedulerState:
 
     def _save_status(self) -> None:
         """Write current status to config/status.json (atomic)."""
+        from uldas.tracking import _json_default
+
         status_path = os.path.join(self._config_dir, "status.json")
         tmp_path = status_path + ".tmp"
         try:
@@ -208,7 +210,7 @@ class SchedulerState:
             data = self.get_status_dict()
             data["updated_at"] = time.time()
             with open(tmp_path, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
+                json.dump(data, fh, indent=2, default=_json_default)
             os.replace(tmp_path, status_path)
         except Exception:
             logger.debug("Failed to write status.json", exc_info=True)

@@ -152,7 +152,7 @@ def run_on_schedule(run_fn: Callable, state=None,
                 if state.status != "error":
                     state.set_status("idle")
         except Exception as e:
-            logger.error("Initial run failed: %s", e)
+            logger.error("Initial run failed: %s", e, exc_info=True)
             print("The Web UI remains available — fix your config and trigger a new run.")
             if state is not None:
                 state.set_status("error", str(e))
@@ -239,7 +239,7 @@ def run_on_schedule(run_fn: Callable, state=None,
             if state is not None and state.status != "error":
                 state.set_status("idle")
         except Exception as e:
-            logger.error("Scheduled run failed: %s", e)
+            logger.error("Scheduled run failed: %s", e, exc_info=True)
             print("The Web UI remains available — fix your config and trigger a new run.")
             if state is not None:
                 state.set_status("error", str(e))

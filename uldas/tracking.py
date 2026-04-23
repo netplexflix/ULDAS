@@ -11,6 +11,30 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _json_default(obj):
+    """Coerce non-JSON-native values (numpy bool/float, etc.) to primitives.
+
+    Logs a warning so we can identify the offending type/value next time
+    a serialization mismatch happens.
+    """
+    # bool MUST be checked before int — bool is a subclass of int
+    if isinstance(obj, bool):
+        coerced = bool(obj)
+    elif isinstance(obj, int):
+        coerced = int(obj)
+    elif isinstance(obj, float):
+        coerced = float(obj)
+    elif hasattr(obj, "item"):  # numpy scalar / 0-d array
+        coerced = obj.item()
+    else:
+        coerced = str(obj)  # last-resort, never raise
+    logger.warning(
+        "JSON coercion: type=%s value=%r -> %r",
+        type(obj).__name__, obj, coerced,
+    )
+    return coerced
+
+
 class ProcessingTracker:
     def __init__(self, config_dir: str = "config", read_only: bool = False):
         self.config_dir = Path(config_dir)
@@ -67,7 +91,7 @@ class ProcessingTracker:
             )
             try:
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                    json.dump(self.data, fh, indent=2)
+                    json.dump(self.data, fh, indent=2, default=_json_default)
                     fh.flush()
                     os.fsync(fh.fileno())
             except BaseException:
@@ -84,8 +108,8 @@ class ProcessingTracker:
 
             os.replace(tmp_path, str(self.tracker_file))
             self._dirty = False
-        except IOError as exc:
-            logger.error("Could not save tracking file: %s", exc)
+        except (IOError, TypeError, ValueError) as exc:
+            logger.error("Could not save tracking file: %s", exc, exc_info=True)
 
     # ── External subtitle persistence ────────────────────────────────────
     def _load_ext_sub(self) -> Dict:
@@ -125,7 +149,7 @@ class ProcessingTracker:
             )
             try:
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                    json.dump(self.ext_sub_data, fh, indent=2)
+                    json.dump(self.ext_sub_data, fh, indent=2, default=_json_default)
                     fh.flush()
                     os.fsync(fh.fileno())
             except BaseException:
@@ -141,8 +165,8 @@ class ProcessingTracker:
 
             os.replace(tmp_path, str(self.ext_sub_file))
             self._ext_sub_dirty = False
-        except IOError as exc:
-            logger.error("Could not save ext-sub tracking file: %s", exc)
+        except (IOError, TypeError, ValueError) as exc:
+            logger.error("Could not save ext-sub tracking file: %s", exc, exc_info=True)
 
     def save_ext_sub_if_dirty(self) -> None:
         """Write external subtitle data to disk only if changed."""
@@ -800,6 +824,6 @@ class ProcessingTracker:
         try:
             Path(config_dir).mkdir(exist_ok=True)
             with open(failed_path, "w", encoding="utf-8") as fh:
-                json.dump(failed, fh, indent=2)
-        except IOError as exc:
-            logger.error("Could not save failed files: %s", exc)
+                json.dump(failed, fh, indent=2, default=_json_default)
+        except (IOError, TypeError, ValueError) as exc:
+            logger.error("Could not save failed files: %s", exc, exc_info=True)
