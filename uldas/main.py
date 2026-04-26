@@ -410,6 +410,89 @@ def _log_reprocess_language_discrepancy(language_index, code: str) -> None:
         logger.warning("  ... and %d more", len(matching) - len(examples))
 
 
+def _path_under_configured(path: str, configured_paths: list) -> bool:
+    """True iff *path* is under any of the configured library roots.
+
+    Mirrors the prefix logic used by the language-index path helpers,
+    so the fast path filters the same way ``prune_outside_paths`` does.
+    """
+    if not configured_paths:
+        return False
+    abs_path = os.path.abspath(path)
+    cmp_path = abs_path if abs_path.endswith(os.sep) else abs_path + os.sep
+    for cp in configured_paths:
+        if not cp:
+            continue
+        root = os.path.abspath(cp)
+        if not root.endswith(os.sep):
+            root = root + os.sep
+        if cmp_path.startswith(root):
+            return True
+    return False
+
+
+def _try_reprocess_language_fast_path(detector, config: Config,
+                                      all_video_results: list) -> bool:
+    """Run reprocess-by-language using the language index (fast path).
+
+    Returns ``True`` if the fast path ran (in which case the caller must
+    skip the directory walk). Returns ``False`` to signal a fall-back
+    to the existing full-library walk.
+    """
+    from pathlib import Path
+
+    code = config.reprocess_language
+    matched = detector.language_index.files_with_audio_language(code)
+    if not matched:
+        logger.warning(
+            "Reprocess-by-language: language index has no '%s' entries "
+            "(or index missing) — falling back to full library scan",
+            code,
+        )
+        return False
+
+    scoped = [p for p in matched
+              if _path_under_configured(p, config.path)]
+    out_of_scope = len(matched) - len(scoped)
+    if not scoped:
+        logger.warning(
+            "Reprocess-by-language: %d index entr%s for '%s' lie outside "
+            "configured paths — falling back to full library scan",
+            len(matched), "y" if len(matched) == 1 else "ies", code,
+        )
+        return False
+
+    existing = [Path(p) for p in scoped if os.path.exists(p)]
+    missing = len(scoped) - len(existing)
+    if not existing:
+        logger.warning(
+            "Reprocess-by-language: %d indexed file(s) for '%s' do not "
+            "exist on disk — falling back to full library scan",
+            len(scoped), code,
+        )
+        return False
+
+    extras = []
+    if missing:
+        extras.append(f"{missing} indexed paths missing on disk, ignored")
+    if out_of_scope:
+        extras.append(f"{out_of_scope} outside configured paths, ignored")
+    suffix = f" ({'; '.join(extras)})" if extras else ""
+    logger.info(
+        "Reprocess-by-language: %d file(s) matched in language index "
+        "for '%s' — skipping full library scan%s",
+        len(existing), code, suffix,
+    )
+    print(
+        f"Reprocess-by-language: {len(existing)} file(s) matched in "
+        f"language index for '{code}' — skipping full library scan",
+        flush=True,
+    )
+
+    all_video_results.extend(detector.process_files(existing))
+    return True
+
+
 def _run_processing(config: Config, skip_update_check: bool = False,
                     state: "Optional[SchedulerState]" = None,
                     config_path: str = "config/config.yml") -> None:
@@ -563,14 +646,21 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     total_ext_subs_found = 0
     total_new_ext_subs = 0
     try:
-        for d in config.path:
-            if state is not None and state.is_stopped():
-                break
-            video_results, ext_sub_results, dir_ext_subs_found, dir_new_ext_subs = detector.process_directory(d)
-            all_video_results.extend(video_results)
-            all_ext_sub_results.extend(ext_sub_results)
-            total_ext_subs_found += dir_ext_subs_found
-            total_new_ext_subs += dir_new_ext_subs
+        fast_path_used = False
+        if config.reprocess_language and hasattr(detector, "language_index"):
+            fast_path_used = _try_reprocess_language_fast_path(
+                detector, config, all_video_results,
+            )
+
+        if not fast_path_used:
+            for d in config.path:
+                if state is not None and state.is_stopped():
+                    break
+                video_results, ext_sub_results, dir_ext_subs_found, dir_new_ext_subs = detector.process_directory(d)
+                all_video_results.extend(video_results)
+                all_ext_sub_results.extend(ext_sub_results)
+                total_ext_subs_found += dir_ext_subs_found
+                total_new_ext_subs += dir_new_ext_subs
 
         if config.reprocess_language and hasattr(detector, "language_index"):
             try:

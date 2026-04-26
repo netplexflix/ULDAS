@@ -1417,7 +1417,7 @@ input[type="date"] { color-scheme: dark; }
             <div class="maintenance-action" data-action="reprocess-language">
                 <div class="maintenance-action-label">Reprocess audio tracks tagged as a specific language</div>
                 <div class="maintenance-action-desc">
-                    <p>Re-runs Whisper on every audio track currently tagged with the chosen language. Ignores the tracking cache; subtitle processing is skipped. <strong>Tip:</strong> pick a larger Whisper Model above and <em>Save Settings</em> first.</p>
+                    <p>Re-runs Whisper on every file currently tagged with the chosen language. <strong>Tip:</strong> Try using a larger Whisper Model for better results.</p>
                 </div>
                 <div class="maintenance-action-controls">
                     <select id="reprocess-language-select">
@@ -2869,7 +2869,7 @@ async function reprocessLanguage() {
     const selectedText = select.options[select.selectedIndex]
         ? select.options[select.selectedIndex].textContent
         : code;
-    if (!confirm(`Start a one-shot run that re-detects every audio track currently tagged as "${selectedText}"?\n\nThis ignores the tracking cache and walks every configured library path. Subtitle processing is skipped during this run.`)) {
+    if (!confirm(`Start a one-shot run that re-processes every audio track currently tagged as "${selectedText}"?`)) {
         return;
     }
     try {

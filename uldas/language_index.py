@@ -289,6 +289,20 @@ class LanguageIndex:
             self._recompute_counts_locked()
             return json.loads(json.dumps(self._data))
 
+    # ── Queries ──────────────────────────────────────────────────────────
+    def files_with_audio_language(self, code: str) -> list:
+        """Return absolute paths whose indexed audio tracks include *code*."""
+        if not code:
+            return []
+        target = normalize_language_code(code) if code else "und"
+        matches: list = []
+        with self._lock:
+            for path, info in self._data.get("per_file", {}).items():
+                audio = info.get("audio") or []
+                if target in audio:
+                    matches.append(path)
+        return matches
+
 
 # ── Module-level path helpers (shared with tracker prune) ────────────────
 def _normalize_path_prefixes(configured_paths: list) -> list:

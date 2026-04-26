@@ -53,6 +53,7 @@ class MKVLanguageDetector:
         self.deletion_failures: list[dict] = []
         self._cancel_check = cancel_check
         self._cancel_logged = False
+        self._reprocess_lang_force_all_audio = False
 
         # Per-file metadata caches, cleared at the start of each
         # process_file() call.  ffprobe/mkvmerge are expensive enough
@@ -1007,9 +1008,13 @@ class MKVLanguageDetector:
             skip_subs = True
         if not skip_audio:
             if self.config.reprocess_language:
-                tracks = self.find_audio_tracks_by_language(
-                    mkv_path, self.config.reprocess_language,
-                )
+                if self._reprocess_lang_force_all_audio:
+                    # Index-driven fast path: files are already targetted, so reprocess all given files
+                    tracks = self.find_all_audio_tracks(mkv_path)
+                else:
+                    tracks = self.find_audio_tracks_by_language(
+                        mkv_path, self.config.reprocess_language,
+                    )
             elif self.config.reprocess_all:
                 tracks = self.find_all_audio_tracks(mkv_path)
             else:
@@ -1211,6 +1216,60 @@ class MKVLanguageDetector:
             subtitle_details=subtitle_details,
             original_format=original_format,
         )
+
+    # ── Process explicit file list (no directory walk) ───────────────────
+    def process_files(self, file_paths: List[Path]) -> List[Dict]:
+        """Process a pre-built list of video files, bypassing the
+        directory walk entirely.
+        Used by the reprocess-by-language fast path.
+        """
+        results: List[Dict] = []
+
+        if self._should_cancel() or not file_paths:
+            return results
+
+        ignore_tags = [t.lower() for t in (self.config.ignore_tags or [])
+                       if isinstance(t, str) and t]
+
+        actionable: List[Path] = []
+        missing = 0
+        ignored = 0
+        for fp in file_paths:
+            try:
+                if not fp.exists():
+                    missing += 1
+                    continue
+            except OSError:
+                missing += 1
+                continue
+            if ignore_tags:
+                stem = fp.stem.lower()
+                if any(tag in stem for tag in ignore_tags):
+                    ignored += 1
+                    continue
+            actionable.append(fp)
+
+        if missing or ignored:
+            logger.info(
+                "process_files filtering: %d missing, %d ignored (ignore_tags), "
+                "%d to process",
+                missing, ignored, len(actionable),
+            )
+
+        prev_force = self._reprocess_lang_force_all_audio
+        if self.config.reprocess_language:
+            self._reprocess_lang_force_all_audio = True
+        try:
+            if actionable:
+                results = self._process_video_files(actionable)
+        finally:
+            self._reprocess_lang_force_all_audio = prev_force
+            if self.config.use_tracking and hasattr(self, "tracker"):
+                self.tracker.save_if_dirty()
+            if hasattr(self, "language_index"):
+                self.language_index.save_if_dirty()
+
+        return results
 
     # ── Process directory ────────────────────────────────────────────────
     def process_directory(self, directory: str) -> Tuple[List[Dict], List[Dict], int, int]:
