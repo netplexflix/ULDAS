@@ -6,7 +6,7 @@ import tempfile
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -482,6 +482,8 @@ class ProcessingTracker:
         self,
         directory: str = None,
         seen_paths: "Optional[set[str]]" = None,
+        on_remove_video: "Optional[Callable[[str], None]]" = None,
+        on_remove_ext_sub: "Optional[Callable[[str], None]]" = None,
     ) -> int:
         """Remove entries for files that no longer exist on disk.
 
@@ -507,16 +509,103 @@ class ProcessingTracker:
         removals = [key for key in self.data if _missing(key)]
         if removals:
             for key in removals:
+                if on_remove_video is not None:
+                    try:
+                        on_remove_video(key)
+                    except Exception:
+                        logger.debug("on_remove_video failed for %s", key, exc_info=True)
                 del self.data[key]
             self._dirty = True
 
         ext_removals = [key for key in self.ext_sub_data if _missing(key)]
         if ext_removals:
             for key in ext_removals:
+                if on_remove_ext_sub is not None:
+                    try:
+                        on_remove_ext_sub(key)
+                    except Exception:
+                        logger.debug("on_remove_ext_sub failed for %s", key, exc_info=True)
                 del self.ext_sub_data[key]
             self._ext_sub_dirty = True
 
         return len(removals) + len(ext_removals)
+
+    def prune_entries_outside_paths(self, configured_paths: list) -> dict:
+        """Remove tracker entries whose path is not under any of configured_paths."""
+        normalized = []
+        for p in configured_paths or []:
+            if not p:
+                continue
+            ap = os.path.abspath(p)
+            if not ap.endswith(os.sep):
+                ap = ap + os.sep
+            normalized.append(ap)
+
+        def _outside(key: str) -> bool:
+            if not normalized:
+                # No libraries configured — treat every entry as outside.
+                return True
+            key_cmp = key if key.endswith(os.sep) else key + os.sep
+            return not any(key_cmp.startswith(p) for p in normalized)
+
+        vid_removals = [k for k in self.data if _outside(k)]
+        for k in vid_removals:
+            del self.data[k]
+        if vid_removals:
+            self._dirty = True
+
+        ext_removals = [k for k in self.ext_sub_data if _outside(k)]
+        for k in ext_removals:
+            del self.ext_sub_data[k]
+        if ext_removals:
+            self._ext_sub_dirty = True
+
+        self.save_if_dirty()
+
+        # Also drop matching entries from failed_files.json so the
+        # dashboard's "Failed" count reflects the cleanup.
+        failed_removed = 0
+        failed_file = self.config_dir / "failed_files.json"
+        if failed_file.exists():
+            try:
+                with open(failed_file, "r", encoding="utf-8") as fh:
+                    failed_data = json.load(fh)
+                kept = {k: v for k, v in failed_data.items() if not _outside(k)}
+                failed_removed = len(failed_data) - len(kept)
+                if failed_removed:
+                    tmp = failed_file.with_suffix(".json.tmp")
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        json.dump(kept, fh, indent=2, default=_json_default)
+                    os.replace(tmp, failed_file)
+            except (json.JSONDecodeError, IOError, OSError) as exc:
+                logger.warning("Could not prune failed_files.json: %s", exc)
+
+        return {
+            "videos": len(vid_removals),
+            "ext_subs": len(ext_removals),
+            "failed": failed_removed,
+        }
+
+    def count_tracked_audio_languages(self) -> list:
+        counts: dict = {}
+        for entry in self.data.values():
+            if entry.get("type") == "external_subtitle":
+                continue
+            details = entry.get("track_details") or []
+            seen_in_file: set = set()
+            for t in details:
+                code = (t.get("detected_language") or "").strip().lower()
+                if not code:
+                    continue
+                bucket = counts.setdefault(code, {"tracks": 0, "files": 0})
+                bucket["tracks"] += 1
+                seen_in_file.add(code)
+            for code in seen_in_file:
+                counts[code]["files"] += 1
+        return [
+            {"code": c, "tracks": v["tracks"], "files": v["files"]}
+            for c, v in sorted(counts.items(), key=lambda x: (-x[1]["tracks"], x[0]))
+        ]
 
     def clear_entry(self, file_path: Path) -> None:
         key = os.path.abspath(str(file_path))

@@ -35,6 +35,10 @@ class SchedulerState:
         self._started_at: Optional[datetime] = None
         self._last_run_summary: Optional[dict] = None
 
+        # One-shot options for the next run (e.g. reprocess_zxx from the
+        # Web UI's Maintenance Actions). Cleared on consumption.
+        self._run_options: dict = {}
+
         # Cross-thread signaling
         self._wake_event = threading.Event()
         self._run_requested = threading.Event()
@@ -75,6 +79,9 @@ class SchedulerState:
                 "schedule_hours": self._schedule_hours,
                 "error_message": self._error_message,
                 "last_run_summary": self._last_run_summary,
+                # Server-local "now" so the UI can compare "today" against
+                # the container's TZ instead of the browser's UTC clock.
+                "server_now": now.strftime("%Y-%m-%dT%H:%M:%S"),
             }
 
     @property
@@ -182,10 +189,37 @@ class SchedulerState:
 
     # ── Commands (called by web UI) ───────────────────────────────────────
 
-    def request_run(self) -> None:
-        """Signal the scheduler to execute a run immediately."""
+    def request_run(self, options: Optional[dict] = None) -> None:
+        """Signal the scheduler to execute a run immediately.
+
+        *options* is an optional dict of one-shot Config overrides applied
+        to the next run only (e.g. ``{"reprocess_zxx": True}``).
+        """
+        with self._lock:
+            self._run_options = dict(options) if options else {}
         self._run_requested.set()
         self._wake_event.set()
+
+    def consume_run_options(self) -> dict:
+        """Atomically read and clear the one-shot options for this run."""
+        with self._lock:
+            opts = self._run_options
+            self._run_options = {}
+        return opts
+
+    def stash_run_options(self, options: Optional[dict]) -> None:
+        """Stash one-shot run options without signalling a new run.
+
+        Used at startup to forward CLI-supplied transient flags
+        (``--reprocess-language``, ``--index-languages``, …) through
+        the same ``consume_run_options`` channel the Web UI uses, so
+        they fire on the first ``_run_processing`` call and are gone
+        on subsequent iterations. Unlike :meth:`request_run`, this
+        does not set the wake / run-requested events, so the scheduler
+        loop won't kick off an extra unsolicited run.
+        """
+        with self._lock:
+            self._run_options = dict(options) if options else {}
 
     def request_stop(self) -> None:
         """Signal the scheduler to pause after the current run completes."""

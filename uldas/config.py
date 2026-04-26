@@ -9,13 +9,25 @@ logger = logging.getLogger(__name__)
 
 class Config:
 
+    TRANSIENT_RUN_OPTIONS: dict = {
+        "index_languages_only": False,
+        "reprocess_language": "",
+        "force_reprocess": False,
+        "reprocess_all": False,
+        "reprocess_all_subtitles": False,
+    }
+
+    def reset_transient_options(self) -> None:
+        for key, default in self.TRANSIENT_RUN_OPTIONS.items():
+            setattr(self, key, default)
+
     def __init__(self):
         # ── Paths & general ──────────────────────────────────────────────
         self.path: list[str] = ["."]
         self.ignore_tags: list[str] = []
         self.remux_to_mkv: bool = False
         self.show_details: bool = True
-        self.whisper_model: str = "base"
+        self.whisper_model: str = "small"
         self.dry_run: bool = False
         self.temp_dir: str = ""
 
@@ -40,6 +52,8 @@ class Config:
         self.reprocess_all: bool = False
         self.use_tracking: bool = True
         self.force_reprocess: bool = False
+        self.reprocess_language: str = ""
+        self.index_languages_only: bool = False
 
         # ── Subtitle processing ──────────────────────────────────────────
         self.process_subtitles: bool = False

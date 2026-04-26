@@ -73,9 +73,16 @@ def convert_iso639_1_to_2(code: str) -> str:
 
 
 def get_language_name(language_code: str) -> str:
-    """Human-readable name for a 3-letter code."""
+    """Human-readable name for a language code."""
     from uldas.constants import LANGUAGE_NAMES
-    return LANGUAGE_NAMES.get(language_code, language_code.upper())
+    name = LANGUAGE_NAMES.get(language_code)
+    if name:
+        return name
+    if "-" in language_code:
+        prefix = language_code.split("-", 1)[0]
+        if prefix in LANGUAGE_NAMES:
+            return LANGUAGE_NAMES[prefix]
+    return language_code.upper()
 
 
 # ── Hallucination detection ──────────────────────────────────────────────

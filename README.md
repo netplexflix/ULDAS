@@ -87,6 +87,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
+      - TZ=America/New_York # Set your timezone
       - CRON_SCHEDULE=0 5 * * 5
       # Examples:
       #   "0 3 * * *"    = every day at 3:00 AM
@@ -136,6 +137,7 @@ services:
 > [!IMPORTANT]
 > The format is: `your-actual-path:container-path`<br>
 
+- **Set the timezone (`TZ`)**  e.g. `Europe/Brussels`, `America/New_York`,  `Asia/Tokyo`,...
 - **Update the CRON Schedule** Tip: [Crontab.Guru](https://crontab.guru/)
   - `CRON_SCHEDULE` (and `SCHEDULE_HOURS`) are only consulted on first start. After that, edit the schedule live from the webUI Settings page → **Scheduler** section (between General and Advanced). You can switch between a simple hours interval and a CRON expression without restarting the container.
   - By default ULDAS does **not** run immediately when the container starts — it waits for the next scheduled time (or a manual **Run Now** from the dashboard), so you have a chance to review your settings in the webUI first. If you prefer ULDAS to start processing as soon as the container is up, enable **Run on Startup** in the webUI Settings → **Scheduler** section (or set `run_on_startup: true` in `config.yml`).

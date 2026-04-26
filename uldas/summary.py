@@ -64,13 +64,18 @@ def print_detailed_summary(
 
         for t in sorted(r["processed_tracks"], key=lambda x: x["track_index"]):
             idx, lang, prev = t["track_index"], t["detected_language"], t.get("previous_language", "und")
+            prev_fmt = f"{prev} (no speech)" if prev == "zxx" else prev
+            lang_fmt = f"{lang} (no speech)" if lang == "zxx" else lang
             if lang == "zxx":
-                actions.append(f"{YELLOW}track{idx}: {prev} -> {lang} (no speech){RESET}")
+                actions.append(f"{YELLOW}track{idx}: {prev_fmt} -> {lang_fmt}{RESET}")
                 has_silent = True
+            elif prev == "zxx":
+                # zxx → real language: detection recovered; highlight cyan.
+                actions.append(f"{CYAN}track{idx}: {prev_fmt} -> {lang_fmt}{RESET}")
             elif prev == lang:
-                actions.append(f"track{idx}: {prev} -> {lang}")
+                actions.append(f"track{idx}: {prev_fmt} -> {lang_fmt}")
             else:
-                actions.append(f"{CYAN}track{idx}: {prev} -> {lang}{RESET}")
+                actions.append(f"{CYAN}track{idx}: {prev_fmt} -> {lang_fmt}{RESET}")
 
         for idx in sorted(r.get("failed_tracks", [])):
             actions.append(f"{RED}track{idx}: failed{RESET}")

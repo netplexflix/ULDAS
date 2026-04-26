@@ -6,6 +6,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
+      - TZ=America/New_York # Set your timezone
       # CRON schedule (optional). Runs on container start + on schedule.
       # Examples:
       #   "0 3 * * *"    = every day at 3:00 AM

@@ -137,8 +137,19 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Confidence threshold for audio language detection (0.0-1.0) (config: confidence_threshold)")
     p.add_argument("--reprocess-all", action="store_true", default=None,
                    help="Reprocess all audio tracks, even those already tagged (config: reprocess_all)")
+    p.add_argument("--reprocess-language", metavar="CODE", default=None,
+                   help="Re-detect only audio tracks currently tagged with "
+                        "this ISO 639-3 code (e.g. 'zxx' for 'no speech', "
+                        "'ja' for Japanese). Ignores tracking cache; skips "
+                        "subtitle processing.")
     p.add_argument("--force-reprocess", action="store_true", default=None,
                    help="Force reprocessing, ignoring tracking cache (config: force_reprocess)")
+    p.add_argument("--index-languages", action="store_true", default=None,
+                   help="Walk every configured library, record the language "
+                        "tag on every audio/subtitle track (internal + "
+                        "external), and write counts to "
+                        "config/language_index.json. No files are modified "
+                        "and Whisper is not loaded.")
 
     # ── Tracking ─────────────────────────────────────────────────────────
     p.add_argument("--no-tracking", action="store_true", default=None,
@@ -250,8 +261,14 @@ def _apply_cli_overrides(config: Config, args) -> None:
     if args.reprocess_all:
         config.reprocess_all = True
 
+    if args.reprocess_language:
+        config.reprocess_language = args.reprocess_language.strip().lower()
+
     if args.force_reprocess:
         config.force_reprocess = True
+
+    if args.index_languages:
+        config.index_languages_only = True
 
     # ── Tracking ─────────────────────────────────────────────────────────
     if args.no_tracking:
@@ -367,6 +384,32 @@ def _build_run_summary(video_results: list, ext_sub_results: list,
     }
 
 
+def _log_reprocess_language_discrepancy(language_index, code: str) -> None:
+    """Warn when reprocess-by-language touched no tracks but the index
+    still claims tracks of *code* exist. Lists up to 10 example paths so
+    the discrepancy is visible in the run log without opening the UI.
+    """
+    snap = language_index.snapshot()
+    per_file = snap.get("per_file") or {}
+    matching = [path for path, info in per_file.items()
+                if code in (info.get("audio") or [])]
+    if not matching:
+        return
+    examples = sorted(matching)[:10]
+    logger.warning(
+        "Language index still lists %d file(s) with '%s' audio tracks "
+        "after the reprocess-by-language run. If those tracks were "
+        "expected to be re-detected, this points to ignore_tags "
+        "filtering, mkvmerge/ffprobe disagreement, or a stale index. "
+        "Examples:",
+        len(matching), code,
+    )
+    for path in examples:
+        logger.warning("  %s", path)
+    if len(matching) > len(examples):
+        logger.warning("  ... and %d more", len(matching) - len(examples))
+
+
 def _run_processing(config: Config, skip_update_check: bool = False,
                     state: "Optional[SchedulerState]" = None,
                     config_path: str = "config/config.yml") -> None:
@@ -377,8 +420,80 @@ def _run_processing(config: Config, skip_update_check: bool = False,
 
     # Reload config from disk so web UI settings changes take effect
     config.load_from_file(config_path)
+    config.reset_transient_options()
+    if state is not None:
+        for key, val in state.consume_run_options().items():
+            if hasattr(config, key):
+                setattr(config, key, val)
+                logger.info("One-shot run option applied: %s=%s", key, val)
 
     _tune_third_party_logging(config.show_details)
+
+    # ── Index-languages one-shot mode ────────────────────────────────────
+    if config.index_languages_only:
+        _apply_temp_dir(config)
+        if not config.path:
+            msg = "No directories configured"
+            logger.error(msg)
+            if state is not None:
+                state.set_status("error", msg)
+                return
+            sys.exit(1)
+        for d in config.path:
+            if not os.path.isdir(d):
+                msg = f"Directory not found: {d}"
+                logger.error(msg)
+                if state is not None:
+                    state.set_status("error", msg)
+                    return
+                sys.exit(1)
+
+        from uldas.language_index import build_language_index, INDEX_FILENAME
+
+        out_path = os.path.join("config", INDEX_FILENAME)
+        try:
+            result = build_language_index(
+                directories=list(config.path),
+                output_path=out_path,
+                include_non_mkv_video=bool(config.remux_to_mkv),
+                ignore_tags=list(config.ignore_tags or []),
+                cancel_check=(state.is_stopped if state is not None else None),
+                show_details=config.show_details,
+            )
+        except Exception as exc:
+            msg = f"Language indexing failed: {exc}"
+            logger.error(msg, exc_info=True)
+            if state is not None:
+                state.set_status("error", msg)
+                return
+            sys.exit(1)
+
+        runtime = time.time() - start
+        print(f"\n{'=' * 60}")
+        print("LANGUAGE INDEX COMPLETE")
+        print(f"{'=' * 60}")
+        print(f"  Videos indexed:            {result['video_files_indexed']}")
+        print(f"  External subs indexed:     {result['external_sub_files_indexed']}")
+        if result.get("files_skipped"):
+            print(f"  Skipped (ignore_tags):     {result['files_skipped']}")
+        print(f"  Unique audio languages:    {len(result['counts']['audio'])}")
+        print(f"  Unique embedded sub langs: {len(result['counts']['embedded_subs'])}")
+        print(f"  Unique external sub langs: {len(result['counts']['external_subs'])}")
+        print(f"  Saved to:                  {out_path}")
+        print(f"  Runtime:                   {runtime:.1f}s")
+
+        if state is not None:
+            state.set_last_run_summary({
+                "runtime_seconds": round(runtime, 1),
+                "index_run": True,
+                "video_files_indexed": result["video_files_indexed"],
+                "external_sub_files_indexed": result["external_sub_files_indexed"],
+                "unique_audio_languages": len(result["counts"]["audio"]),
+                "unique_embedded_sub_languages": len(result["counts"]["embedded_subs"]),
+                "unique_external_sub_languages": len(result["counts"]["external_subs"]),
+                "cancelled": result.get("cancelled", False),
+            })
+        return
 
     # Apply temp_dir setting
     _apply_temp_dir(config)
@@ -456,6 +571,15 @@ def _run_processing(config: Config, skip_update_check: bool = False,
             all_ext_sub_results.extend(ext_sub_results)
             total_ext_subs_found += dir_ext_subs_found
             total_new_ext_subs += dir_new_ext_subs
+
+        if config.reprocess_language and hasattr(detector, "language_index"):
+            try:
+                _log_reprocess_language_discrepancy(
+                    detector.language_index, config.reprocess_language,
+                )
+            except Exception:
+                logger.debug("Reprocess discrepancy check failed",
+                             exc_info=True)
     finally:
         # Final flush of batched tracker writes, even on exception.
         if config.use_tracking and hasattr(detector, "tracker"):
@@ -536,6 +660,16 @@ def main() -> None:
 
     # ── Scheduler state (shared between main thread and web UI) ────────
     sched_state = SchedulerState(config_dir="config")
+    cli_one_shot: dict = {}
+    for _key, _default in Config.TRANSIENT_RUN_OPTIONS.items():
+        _current = getattr(config, _key)
+        if _current != _default:
+            cli_one_shot[_key] = _current
+            setattr(config, _key, _default)
+    if cli_one_shot:
+        sched_state.stash_run_options(cli_one_shot)
+        logger.info("CLI one-shot flags forwarded to first run: %s",
+                    ", ".join(f"{k}={v}" for k, v in cli_one_shot.items()))
 
     # ── Web UI ───────────────────────────────────────────────────────────
     try:
@@ -545,11 +679,6 @@ def main() -> None:
         logger.debug("Web UI not started: %s", exc)
 
     # ── Scheduling (Docker) ──────────────────────────────────────────────
-    # Scheduled mode is activated when:
-    #   1. config.yml has a schedule_type key (persisted by a previous run), or
-    #   2. CRON / CRON_SCHEDULE / SCHEDULE_HOURS env var is set.
-    # In all other cases, a single processing run is executed and the
-    # process exits (preserving the historical CLI behavior).
     from uldas.scheduler import _load_initial_schedule, run_on_schedule
 
     import yaml as _yaml

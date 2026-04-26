@@ -70,6 +70,28 @@ class MKVLanguageDetector:
             self.tracker = ProcessingTracker("config", read_only=config.dry_run)
             if config.force_reprocess:
                 logger.info("Force reprocess enabled – ignoring tracking cache")
+            if config.reprocess_language:
+                logger.info(
+                    "Reprocess-by-language mode: scanning every file for audio "
+                    "tracks currently tagged '%s'; subtitle processing disabled "
+                    "for this run",
+                    config.reprocess_language,
+                )
+
+        # ── Language index (incremental) ─────────────────────────────────
+        from uldas.language_index import LanguageIndex
+        self.language_index = LanguageIndex(
+            config_dir="config", read_only=config.dry_run,
+        )
+
+        removed = self.language_index.prune_ignored_tags(config.ignore_tags)
+        if removed["files"] or removed["ext_subs"]:
+            logger.info(
+                "Pruned %d video + %d ext-sub language-index entries "
+                "matching ignore_tags",
+                removed["files"], removed["ext_subs"],
+            )
+            self.language_index.save_if_dirty()
 
         # ── Device / compute ─────────────────────────────────────────────
         device = self._determine_device()
@@ -195,6 +217,7 @@ class MKVLanguageDetector:
             and not self.config.force_reprocess
             and not self.config.reprocess_all
             and not self.config.reprocess_all_subtitles
+            and not self.config.reprocess_language
         )
         use_fast_skip_sub = (
             use_tracking
@@ -273,6 +296,14 @@ class MKVLanguageDetector:
                                     self.tracker.mark_external_subtitle_tracked(
                                         sub_path, language_code=lang_tag,
                                     )
+                                # Already-tagged external subs never reach
+                                # process_external_subtitle_file, so record
+                                # them in the language index here.
+                                if (not self.config.dry_run
+                                        and hasattr(self, "language_index")):
+                                    self.language_index.update_ext_sub(
+                                        sub_path, lang_tag,
+                                    )
                                 new_already_labeled += 1
                                 continue
                         sub_files.append(sub_path)
@@ -295,6 +326,8 @@ class MKVLanguageDetector:
         # Flush tracked no_action_required entries (only on dirty; batched)
         if use_tracking and not self.config.dry_run:
             self.tracker.save_ext_sub_if_dirty()
+        if not self.config.dry_run and hasattr(self, "language_index"):
+            self.language_index.save_if_dirty()
 
         # Stash the seen-set so prune_missing_files can skip redundant I/O.
         self._last_scan_seen_paths = seen_paths
@@ -611,6 +644,8 @@ class MKVLanguageDetector:
 
     def find_undefined_audio_tracks(self, fp): return self._find_tracks(fp, "audio", True)
     def find_all_audio_tracks(self, fp): return self._find_tracks(fp, "audio", False)
+    def find_audio_tracks_by_language(self, fp, code):
+        return [t for t in self._find_tracks(fp, "audio", False) if t[3] == code]
     def find_undefined_subtitle_tracks(self, fp): return self._find_tracks(fp, "subtitle", True)
     def find_all_subtitle_tracks(self, fp): return self._find_tracks(fp, "subtitle", False)
 
@@ -787,6 +822,9 @@ class MKVLanguageDetector:
                     self.tracker.mark_external_subtitle_processed(
                         sub_path, code, new_path,
                     )
+                # Keep the language index in sync with the rename.
+                if not self.config.dry_run and hasattr(self, "language_index"):
+                    self.language_index.rename_ext_sub(sub_path, new_path, code)
             else:
                 result["reason"] = "rename_failed"
 
@@ -889,7 +927,11 @@ class MKVLanguageDetector:
 
         skip_audio = skip_subs = False
         if self.config.use_tracking and hasattr(self, "tracker"):
-            bypass = self.config.reprocess_all or self.config.reprocess_all_subtitles
+            bypass = (
+                self.config.reprocess_all
+                or self.config.reprocess_all_subtitles
+                or bool(self.config.reprocess_language)
+            )
             if not bypass:
                 entry = self.tracker.get_entry(file_path, key=abs_key)
                 if entry:
@@ -958,10 +1000,20 @@ class MKVLanguageDetector:
         audio_ok = subtitle_ok = False
 
         # ── Audio ────────────────────────────────────────────────────────
+        if self.config.reprocess_language:
+            # One-shot mode: only look at audio tracks currently tagged
+            # with the requested language code, and leave subtitle tracks
+            # untouched regardless of the "Process Subtitles" setting.
+            skip_subs = True
         if not skip_audio:
-            tracks = (self.find_all_audio_tracks(mkv_path)
-                      if self.config.reprocess_all
-                      else self.find_undefined_audio_tracks(mkv_path))
+            if self.config.reprocess_language:
+                tracks = self.find_audio_tracks_by_language(
+                    mkv_path, self.config.reprocess_language,
+                )
+            elif self.config.reprocess_all:
+                tracks = self.find_all_audio_tracks(mkv_path)
+            else:
+                tracks = self.find_undefined_audio_tracks(mkv_path)
 
             # After remux, tracks that were already labeled in the original
             # file may appear undefined (ffmpeg can lose tags).  Re-apply
@@ -1029,50 +1081,75 @@ class MKVLanguageDetector:
         # ── Tracking ─────────────────────────────────────────────────────
         if (self.config.use_tracking and hasattr(self, "tracker")
                 and not self.config.dry_run):
-            flags = []
-            if results["was_remuxed"]:
-                flags.append("remuxed")
-                # Use remuxed file path as tracking key so the next run
-                # recognises the .mkv instead of creating a duplicate entry.
-                old_key = abs_key
-                abs_key = os.path.abspath(str(mkv_path))
-                if old_key != abs_key and old_key in self.tracker.data:
-                    del self.tracker.data[old_key]
-                    self.tracker._dirty = True
-            audio_count = 0
-            if results["processed_tracks"]:
-                # Only flag "audio_labeled" for genuinely undefined tracks,
-                # not for labels that were merely restored after remux.
-                genuinely_detected = [
-                    t for t in results["processed_tracks"]
-                    if t["track_index"] not in original_audio_langs
-                ]
-                audio_count = len(genuinely_detected)
-                if audio_count:
-                    flags.append("audio_labeled")
-                if any(t["detected_language"] == "zxx" for t in results["processed_tracks"]):
-                    flags.append("silent_content")
-            subtitle_count = 0
-            sub_res = results.get("subtitle_results")
-            if sub_res and sub_res.get("processed_subtitle_tracks"):
-                subtitle_count = len(sub_res["processed_subtitle_tracks"])
-                flags.append("subtitle_labeled")
-            if not flags:
-                flags.append("no_action_required")
-            track_details = results["processed_tracks"] or None
-            subtitle_details = None
-            if sub_res and sub_res.get("processed_subtitle_tracks"):
-                subtitle_details = sub_res["processed_subtitle_tracks"]
-            original_format = file_path.suffix if results["was_remuxed"] else None
-            self.tracker.mark_processed(
-                mkv_path, audio_ok, subtitle_ok,
-                key=abs_key, flags=flags,
-                audio_tracks_labeled=audio_count,
-                subtitle_tracks_labeled=subtitle_count,
-                track_details=track_details,
-                subtitle_details=subtitle_details,
-                original_format=original_format,
-            )
+            if self.config.reprocess_language:
+                touched = bool(results["processed_tracks"]
+                               or results["failed_tracks"])
+                if touched:
+                    self._update_tracker_relabel(mkv_path, abs_key,
+                                                 audio_ok, results)
+            else:
+                flags = []
+                if results["was_remuxed"]:
+                    flags.append("remuxed")
+                    # Use remuxed file path as tracking key so the next run
+                    # recognises the .mkv instead of creating a duplicate entry.
+                    old_key = abs_key
+                    abs_key = os.path.abspath(str(mkv_path))
+                    if old_key != abs_key and old_key in self.tracker.data:
+                        del self.tracker.data[old_key]
+                        self.tracker._dirty = True
+                audio_count = 0
+                if results["processed_tracks"]:
+                    # Only flag "audio_labeled" for genuinely undefined tracks,
+                    # not for labels that were merely restored after remux.
+                    genuinely_detected = [
+                        t for t in results["processed_tracks"]
+                        if t["track_index"] not in original_audio_langs
+                    ]
+                    audio_count = len(genuinely_detected)
+                    if audio_count:
+                        flags.append("audio_labeled")
+                    if any(t["detected_language"] == "zxx" for t in results["processed_tracks"]):
+                        flags.append("silent_content")
+                subtitle_count = 0
+                sub_res = results.get("subtitle_results")
+                if sub_res and sub_res.get("processed_subtitle_tracks"):
+                    subtitle_count = len(sub_res["processed_subtitle_tracks"])
+                    flags.append("subtitle_labeled")
+                if not flags:
+                    flags.append("no_action_required")
+                track_details = results["processed_tracks"] or None
+                subtitle_details = None
+                if sub_res and sub_res.get("processed_subtitle_tracks"):
+                    subtitle_details = sub_res["processed_subtitle_tracks"]
+                original_format = file_path.suffix if results["was_remuxed"] else None
+                self.tracker.mark_processed(
+                    mkv_path, audio_ok, subtitle_ok,
+                    key=abs_key, flags=flags,
+                    audio_tracks_labeled=audio_count,
+                    subtitle_tracks_labeled=subtitle_count,
+                    track_details=track_details,
+                    subtitle_details=subtitle_details,
+                    original_format=original_format,
+                )
+
+        # ── Language index (incremental) ────────────────────────────────
+        if not self.config.dry_run and hasattr(self, "language_index"):
+            try:
+                # Invalidate the per-file ffprobe cache so the re-probe
+                # reflects any language tags we just wrote.
+                self._invalidate_file_caches(mkv_path)
+                from uldas.language_index import _probe_track_langs
+                audio_codes, sub_codes = _probe_track_langs(
+                    self.ffprobe, mkv_path, mkvmerge=self.mkvmerge,
+                )
+                self.language_index.update_file(mkv_path, audio_codes, sub_codes)
+                if results["was_remuxed"] and str(file_path) != str(mkv_path):
+                    # Original file no longer exists after a successful remux.
+                    self.language_index.remove_file(file_path)
+            except Exception:
+                logger.debug("Language-index update failed for %s",
+                             mkv_path, exc_info=True)
 
         # Clean up memory between files
         audio_mod._cleanup_cuda_memory()
@@ -1081,6 +1158,59 @@ class MKVLanguageDetector:
         self._invalidate_file_caches(file_path, mkv_path)
 
         return results
+
+    # ── Tracker update for the by-language reprocess mode ────────────────
+    def _update_tracker_relabel(self, mkv_path: Path, abs_key: str,
+                                audio_ok: bool, results: Dict) -> None:
+        """Merge a by-language re-detection result into the existing entry."""
+        existing = self.tracker.get_entry(mkv_path, key=abs_key) or {}
+
+        old_details = list(existing.get("track_details") or [])
+        new_details = results["processed_tracks"] or []
+        new_idxs = {t["track_index"] for t in new_details}
+        merged_details = [t for t in old_details
+                          if t.get("track_index") not in new_idxs]
+        merged_details.extend(new_details)
+        merged_details.sort(key=lambda t: t.get("track_index", 0))
+
+        prior_flags = list(existing.get("flags") or [])
+        # Strip silent_content / no_action_required; we recompute those.
+        flags = [f for f in prior_flags
+                 if f not in ("silent_content", "no_action_required")]
+        if any(t.get("detected_language") == "zxx" for t in merged_details):
+            if "silent_content" not in flags:
+                flags.append("silent_content")
+        if not flags:
+            flags.append("no_action_required")
+
+        # Preserve prior counts: relabels do not add to the lifetime total.
+        audio_count = int(existing.get("audio_tracks_labeled", 0))
+        if audio_count == 0 and "audio_labeled" not in prior_flags and new_details:
+            audio_count = sum(
+                1 for t in new_details if t.get("detected_language") != "zxx"
+            )
+            if audio_count and "audio_labeled" not in flags:
+                flags.append("audio_labeled")
+        subtitle_count = int(existing.get("subtitle_tracks_labeled", 0))
+
+        original_format = existing.get("original_format")
+        subtitle_details = existing.get("subtitle_details")
+        prior_audio = bool(existing.get("audio_processed", False))
+        prior_sub = bool(existing.get("subtitle_processed", False))
+        audio_success = prior_audio or audio_ok
+
+        self.tracker.mark_processed(
+            mkv_path,
+            audio_success,
+            prior_sub,
+            key=abs_key,
+            flags=flags,
+            audio_tracks_labeled=audio_count,
+            subtitle_tracks_labeled=subtitle_count,
+            track_details=merged_details or None,
+            subtitle_details=subtitle_details,
+            original_format=original_format,
+        )
 
     # ── Process directory ────────────────────────────────────────────────
     def process_directory(self, directory: str) -> Tuple[List[Dict], List[Dict], int, int]:
@@ -1103,16 +1233,19 @@ class MKVLanguageDetector:
             total_ext_subs_found = len(ext_sub_files) + new_already_labeled + sub_skipped
             new_ext_subs = len(ext_sub_files) + new_already_labeled
 
-            # Prune tracker entries for files that no longer exist in this
-            # directory.  The scan already collected every on-disk path in
-            # self._last_scan_seen_paths, so the tracker doesn't need to
-            # re-stat every key.  Skipped on dry_run so a preview can't
-            # remove entries.
+            # Prune tracker entries for files that no longer exist
             if (self.config.use_tracking and hasattr(self, "tracker")
                     and not self.config.dry_run):
+                on_vid_remove = None
+                on_sub_remove = None
+                if hasattr(self, "language_index"):
+                    on_vid_remove = self.language_index.remove_file
+                    on_sub_remove = self.language_index.remove_ext_sub
                 pruned = self.tracker.prune_missing_files(
                     directory,
                     seen_paths=getattr(self, "_last_scan_seen_paths", None),
+                    on_remove_video=on_vid_remove,
+                    on_remove_ext_sub=on_sub_remove,
                 )
                 if pruned and self.config.show_details:
                     logger.info("Pruned %d orphaned tracker entries", pruned)
@@ -1140,6 +1273,8 @@ class MKVLanguageDetector:
             # also runs on exceptions so partial progress is saved.
             if self.config.use_tracking and hasattr(self, "tracker"):
                 self.tracker.save_if_dirty()
+            if hasattr(self, "language_index"):
+                self.language_index.save_if_dirty()
 
         return video_results, ext_sub_results, total_ext_subs_found, new_ext_subs
 
@@ -1155,7 +1290,11 @@ class MKVLanguageDetector:
         if (self.config.use_tracking
                 and hasattr(self, "tracker")
                 and not self.config.force_reprocess):
-            bypass = self.config.reprocess_all or self.config.reprocess_all_subtitles
+            bypass = (
+                self.config.reprocess_all
+                or self.config.reprocess_all_subtitles
+                or bool(self.config.reprocess_language)
+            )
             if not bypass and len(video_files) > 0:
                 if self.config.show_details:
                     logger.info("Validating %d candidate files against tracker...", total)
@@ -1225,10 +1364,11 @@ class MKVLanguageDetector:
                     "skipped_due_to_tracking": False,
                 })
 
-            if (action_idx % checkpoint_every == 0
-                    and self.config.use_tracking
-                    and hasattr(self, "tracker")):
-                self.tracker.save_if_dirty()
+            if action_idx % checkpoint_every == 0:
+                if self.config.use_tracking and hasattr(self, "tracker"):
+                    self.tracker.save_if_dirty()
+                if hasattr(self, "language_index"):
+                    self.language_index.save_if_dirty()
 
         return results
 

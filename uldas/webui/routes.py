@@ -215,7 +215,7 @@ CONFIG_OPTIONS = [
     {
         "key": "whisper_model",
         "type": "select",
-        "default": "base",
+        "default": "small",
         "label": "Whisper Model",
         "description": "Whisper model size for audio language detection. Larger models are more accurate but slower and use more memory.",
         "options": ["tiny", "base", "small", "medium", "large"],
@@ -375,6 +375,38 @@ def register_routes(app, scheduler_state=None):
         scheduler_state.request_run()
         return jsonify({"status": "ok", "message": "Run triggered"})
 
+    @app.route("/api/scheduler/index-languages", methods=["POST"])
+    def scheduler_index_languages():
+        if scheduler_state is None:
+            return jsonify({"status": "error",
+                            "message": "No scheduler active (not in CRON mode)"}), 404
+        if scheduler_state.status == "running":
+            return jsonify({"status": "error",
+                            "message": "A processing run is already in progress"}), 409
+        scheduler_state.request_run(options={"index_languages_only": True})
+        return jsonify({"status": "ok",
+                        "message": "Language indexing run triggered"})
+
+    @app.route("/api/scheduler/reprocess-language", methods=["POST"])
+    def scheduler_reprocess_language():
+        if scheduler_state is None:
+            return jsonify({"status": "error",
+                            "message": "No scheduler active (not in CRON mode)"}), 404
+        if scheduler_state.status == "running":
+            return jsonify({"status": "error",
+                            "message": "A processing run is already in progress"}), 409
+        body = request.get_json(silent=True) or {}
+        code = (body.get("language") or "").strip().lower()
+        if not code:
+            return jsonify({"status": "error",
+                            "message": "Missing 'language' in request body"}), 400
+        if not code.replace("-", "").isalnum() or len(code) > 10:
+            return jsonify({"status": "error",
+                            "message": f"Invalid language code: {code}"}), 400
+        scheduler_state.request_run(options={"reprocess_language": code})
+        return jsonify({"status": "ok",
+                        "message": f"Reprocess run triggered for language '{code}'"})
+
     @app.route("/api/scheduler/stop", methods=["POST"])
     def scheduler_stop():
         if scheduler_state is None:
@@ -529,6 +561,162 @@ def register_routes(app, scheduler_state=None):
         granularity = request.args.get("granularity", "day")
         limit = request.args.get("limit", 30, type=int)
         return jsonify(tracker.get_time_series(granularity, limit))
+
+    def _name_for(code: str) -> str:
+        from uldas.constants import LANGUAGE_NAMES
+        name = LANGUAGE_NAMES.get(code)
+        if not name and "-" in code:
+            name = LANGUAGE_NAMES.get(code.split("-", 1)[0])
+        if name:
+            # Drop the alternate-name tail ("Foo; Bar; Baz") for UI
+            # cleanliness — the primary name is the canonical label.
+            return name.split(";", 1)[0].strip()
+        return "Unknown"
+
+    @app.route("/api/stats/languages")
+    def get_languages():
+        from uldas.language_index import load_language_index
+
+        index = load_language_index(webui._config_dir)
+        if index and isinstance(index.get("counts"), dict):
+            audio = index["counts"].get("audio") or {}
+            items = [{"code": code, "name": _name_for(code)}
+                     for code in audio.keys()]
+            items.sort(key=lambda x: (x["name"].lower(), x["code"]))
+            return jsonify({
+                "source": "index",
+                "indexed_at": index.get("indexed_at"),
+                "languages": items,
+            })
+
+        tracker = _get_cached_tracker(webui._config_dir)
+        raw = tracker.count_tracked_audio_languages()
+        items = [{"code": r["code"], "name": _name_for(r["code"])} for r in raw]
+        items.sort(key=lambda x: (x["name"].lower(), x["code"]))
+        return jsonify({
+            "source": "tracker",
+            "indexed_at": None,
+            "languages": items,
+        })
+
+    @app.route("/api/stats/language-index")
+    def get_language_index():
+        """Return the full language-index document for the dashboard's
+        language-distribution chart. 404 when no index has been built.
+        """
+        from uldas.language_index import load_language_index
+        index = load_language_index(webui._config_dir)
+        if not index:
+            return jsonify({"status": "missing"}), 404
+
+        # Attach a {code: name} map for every code present so the chart
+        # can render "<code> - <name>" labels matching the dropdown style.
+        names: dict = {}
+        counts = index.get("counts") if isinstance(index, dict) else None
+        if isinstance(counts, dict):
+            for bucket in counts.values():
+                if isinstance(bucket, dict):
+                    for code in bucket.keys():
+                        if code and code not in names:
+                            names[code] = _name_for(code)
+        index["names"] = names
+        return jsonify(index)
+
+    @app.route("/api/stats/language-index/files")
+    def get_language_index_files():
+        from uldas.language_index import load_language_index
+
+        code = (request.args.get("code") or "").strip().lower()
+        kind = (request.args.get("kind") or "audio").strip().lower()
+        try:
+            limit = int(request.args.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        limit = max(1, min(limit, 5000))
+
+        if not code:
+            return jsonify({"status": "error",
+                            "message": "Missing 'code' query parameter"}), 400
+        if kind not in ("audio", "embedded_subs", "external_subs"):
+            return jsonify({"status": "error",
+                            "message": ("Invalid 'kind': must be audio, "
+                                        "embedded_subs, or external_subs")}), 400
+
+        index = load_language_index(webui._config_dir)
+        if not index:
+            return jsonify({"status": "missing"}), 404
+
+        matches: list = []
+        total = 0
+        if kind == "external_subs":
+            for path, stored_code in (index.get("per_ext_sub") or {}).items():
+                if stored_code == code:
+                    total += 1
+                    if len(matches) < limit:
+                        matches.append({"path": path, "code": stored_code})
+        else:
+            for path, info in (index.get("per_file") or {}).items():
+                codes = list(info.get(kind) or [])
+                if code in codes:
+                    total += 1
+                    if len(matches) < limit:
+                        matches.append({"path": path, "tracks": codes})
+        matches.sort(key=lambda m: m["path"].lower())
+        return jsonify({
+            "code": code,
+            "kind": kind,
+            "matches": matches,
+            "total": total,
+            "truncated": total > len(matches),
+        })
+
+    # ── Cache maintenance API ─────────────────────────────────────────────
+
+    @app.route("/api/cache/prune-orphans", methods=["POST"])
+    def prune_orphans():
+        """Remove tracker entries whose path is no longer under any of the currently-configured library paths."""
+        from uldas.tracking import ProcessingTracker
+
+        # Read the live config.yml to discover the current library paths.
+        config_path = webui._config_path
+        configured_paths: list = []
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+                raw = cfg.get("path") or []
+                if isinstance(raw, str):
+                    raw = [raw]
+                configured_paths = [p for p in raw if isinstance(p, str) and p.strip()]
+            except Exception as exc:
+                return jsonify({"status": "error",
+                                "message": f"Could not read config: {exc}"}), 500
+
+        tracker = ProcessingTracker(webui._config_dir, read_only=False)
+        removed = tracker.prune_entries_outside_paths(configured_paths)
+
+        # Also prune the language index so the Dashboard chart + the
+        # Reprocess-by-language dropdown stop counting the removed files.
+        from uldas.language_index import LanguageIndex
+        lang_index = LanguageIndex(config_dir=webui._config_dir, read_only=False)
+        idx_removed = lang_index.prune_outside_paths(configured_paths)
+        lang_index.save_if_dirty()
+
+        # Invalidate the cached read-only tracker so the dashboard reflects
+        # the cleanup on the next poll.
+        with _tracker_cache_lock:
+            _tracker_cache["tracker"] = None
+            _tracker_cache["mtimes"] = ()
+
+        total = (removed["videos"] + removed["ext_subs"] + removed["failed"]
+                 + idx_removed["files"] + idx_removed["ext_subs"])
+        return jsonify({
+            "status": "ok",
+            "removed": removed,
+            "index_removed": idx_removed,
+            "total": total,
+            "configured_paths": configured_paths,
+        })
 
     # ── Update check API ──────────────────────────────────────────────────
 
