@@ -467,38 +467,6 @@ def process_transcription_result(result: Dict, config) -> Optional[str]:
 
 
 # ── High-level detection ─────────────────────────────────────────────────
-def detect_language_with_fallback(
-    whisper_model, audio_path: Path, config, ffmpeg: str = None,
-) -> Optional[str]:
-    if not audio_path.exists() or audio_path.stat().st_size < 1000:
-        logger.error("Audio file too small or missing: %s", audio_path)
-        return None
-
-    vad_removed_all = False
-
-    if config.vad_filter:
-        result = attempt_transcription(
-            whisper_model, audio_path, True, "with_vad", config, ffmpeg=ffmpeg,
-        )
-        if result and result.get("pre_vad_silent"):
-            # VAD confirmed no speech — skip without_vad entirely
-            return process_transcription_result(result, config)
-        if result and result["segments_detected"] > 0:
-            return process_transcription_result(result, config)
-        if result and result["segments_detected"] == 0:
-            vad_removed_all = True
-
-    result = attempt_transcription(
-        whisper_model, audio_path, False, "without_vad", config, ffmpeg=ffmpeg,
-    )
-    if result:
-        result["vad_removed_all"] = vad_removed_all
-        return process_transcription_result(result, config)
-
-    logger.error("Both transcription attempts failed")
-    return None
-
-
 def detect_language_with_confidence(
     whisper_model, audio_path: Path, config, ffmpeg: str = None,
 ) -> Optional[Dict]:

@@ -248,8 +248,7 @@ def _detect_language_by_characters(text: str, subtitle_count: int) -> Optional[D
         return {"language_code": "chi", "confidence": min(0.85, 0.45 + cjr * 0.5),
                 "subtitle_count": subtitle_count}
     if lr > 0.7:
-        conf = min(0.65, 0.3 + (lr - 0.7) * 0.3 + min(0.2, len(text) / 5000))
-        return {"language_code": "eng", "confidence": conf,
+        return {"language_code": "und", "confidence": 0.1,
                 "subtitle_count": subtitle_count}
 
     return {"language_code": "und", "confidence": 0.1,

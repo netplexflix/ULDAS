@@ -302,29 +302,6 @@ class ProcessingTracker:
 
         return actionable, skipped, key_cache
 
-    # ── Single-file query (kept for backward compat) ─────────────────────
-    def is_processed(self, file_path: Path) -> bool:
-        key = os.path.abspath(str(file_path))
-        if key not in self.data:
-            return False
-
-        entry = self.data[key]
-
-        try:
-            stat = file_path.stat()
-        except OSError:
-            del self.data[key]
-            self._dirty = True
-            return False
-
-        if (entry.get("size") != stat.st_size
-                or abs(entry.get("mtime", 0) - stat.st_mtime) > 1):
-            del self.data[key]
-            self._dirty = True
-            return False
-
-        return True
-
     def get_entry(self, file_path: Path, key: str = None) -> dict:
         """Return the tracker entry without any filesystem I/O."""
         if key is None:
@@ -374,30 +351,6 @@ class ProcessingTracker:
         self._dirty = True
 
     # ── External subtitle tracking ───────────────────────────────────────
-    def is_external_subtitle_processed(self, subtitle_path: Path) -> bool:
-        key = os.path.abspath(str(subtitle_path))
-        if key not in self.ext_sub_data:
-            return False
-
-        entry = self.ext_sub_data[key]
-        if entry.get("type") != "external_subtitle":
-            return False
-
-        try:
-            stat = subtitle_path.stat()
-        except OSError:
-            del self.ext_sub_data[key]
-            self._ext_sub_dirty = True
-            return False
-
-        if (entry.get("size") != stat.st_size
-                or abs(entry.get("mtime", 0) - stat.st_mtime) > 1):
-            del self.ext_sub_data[key]
-            self._ext_sub_dirty = True
-            return False
-
-        return True
-
     def is_external_subtitle_tracked(self, subtitle_path: Path) -> bool:
         """Check if an external subtitle file is already tracked (any flag)."""
         key = os.path.abspath(str(subtitle_path))

@@ -245,15 +245,3 @@ def run_on_schedule(run_fn: Callable, state=None,
                 state.set_status("error", str(e))
         if state is not None:
             state.set_last_run(datetime.now())
-
-
-def get_cron_schedule() -> Optional[str]:
-    """Legacy helper: read CRON_SCHEDULE / CRON from environment.
-
-    Kept for backwards compatibility with any callers outside ULDAS; the
-    main entry point now uses _load_initial_schedule() instead.
-    """
-    val = os.environ.get("CRON_SCHEDULE", "").strip()
-    if not val:
-        val = os.environ.get("CRON", "").strip()
-    return val if val else None

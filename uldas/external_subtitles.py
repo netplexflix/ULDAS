@@ -3,10 +3,9 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from uldas.constants import (
-    EXTERNAL_SUBTITLE_EXTENSIONS,
     ISO639_1_TO_2,
     ISO639_2_TO_1,
     ISO639_ALTERNATIVE_CODES,
@@ -28,10 +27,6 @@ _KNOWN_FLAGS: set[str] = {"forced", "sdh", "hi", "cc", "default", "full"}
 
 def _is_language_code(token: str) -> bool:
     return token.lower() in _ALL_LANG_CODES
-
-
-def has_language_tag(subtitle_path: Path) -> bool:
-    return get_language_tag(subtitle_path) is not None
 
 
 def get_language_tag(subtitle_path: Path) -> Optional[str]:
@@ -64,38 +59,6 @@ def get_language_tag(subtitle_path: Path) -> Optional[str]:
                 return deeper_candidate
 
     return None
-
-
-def find_external_subtitles(
-    video_path: Path,
-    reprocess_all: bool = False,
-) -> List[Path]:
-    parent = video_path.parent
-    video_stem = video_path.stem.lower()
-
-    results: List[Path] = []
-
-    try:
-        for entry in parent.iterdir():
-            if not entry.is_file():
-                continue
-            if entry.suffix.lower() not in EXTERNAL_SUBTITLE_EXTENSIONS:
-                continue
-            entry_stem_lower = entry.stem.lower()
-            if not entry_stem_lower.startswith(video_stem):
-                continue
-
-            if reprocess_all:
-                results.append(entry)
-            else:
-                if not has_language_tag(entry):
-                    results.append(entry)
-    except PermissionError as exc:
-        logger.warning("Permission denied scanning for external subtitles: %s", exc)
-    except Exception as exc:
-        logger.error("Error scanning for external subtitles: %s", exc)
-
-    return results
 
 
 def detect_external_subtitle_language(
@@ -364,8 +327,7 @@ def _detect_language_by_characters(text: str) -> Optional[Dict]:
     if cjr > 0.3:
         return {"language_code": "chi", "confidence": min(0.85, 0.45 + cjr * 0.5)}
     if lr > 0.7:
-        conf = min(0.65, 0.3 + (lr - 0.7) * 0.3 + min(0.2, len(text) / 5000))
-        return {"language_code": "eng", "confidence": conf}
+        return {"language_code": "und", "confidence": 0.1}
 
     return {"language_code": "und", "confidence": 0.1}
 
