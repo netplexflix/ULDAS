@@ -1,9 +1,14 @@
-<img width="668" height="201" alt="Image" src="https://github.com/user-attachments/assets/d6d715f7-59cb-4321-ad29-97d04dbd2de5" /> <br>
+<p align="center">
+  <img width="668" height="201" alt="Image" src="https://github.com/user-attachments/assets/d6d715f7-59cb-4321-ad29-97d04dbd2de5" /> <br>
+   <a href="https://github.com/netplexflix/ULDAS/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/netplexflix/ULDAS?style=plastic"></a>
+   <a href="https://hub.docker.com/repository/docker/netplexflix/uldas"><img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/netplexflix/uldas?style=plastic"></a>
+   <a href="https://discord.gg/VBNUJd7tx3"><img alt="Discord" src="https://img.shields.io/discord/1329439972796928041?style=plastic&label=Discord"></a>
+</p>
 
 Do you have Movies or TV shows in your media player for which the audio and/or subtitle tracks are labeled as "undefined" or "unknown"?</br>
 ULDAS (Undefined Language Detector for Audio and Subtitles) solves that problem by:
 
-1. Scanning your video files for audio and subtitle tracks with undefined language
+1. Scanning your video and subtitle files for undefined tracks
 2. Extracting audio and subtitle samples
 3. Using AI speech recognition to detect the audio language
 4. Detecting subtitle language (can also detect if subtitles are [FORCED] and/or [SDH])
@@ -21,90 +26,173 @@ Requires
 
 ---
 
+## 📑 Table of Contents
+
+- [🛠️ Installation](#installation)
+    - [Step 1: Install Docker](#step-1-install-docker)
+    - [Step 2: Create docker-compose file](#step-2-create-docker-compose-file)
+    - [Step 3: Update volumes, IDs, port and CRON Schedule](#step-3-update)
+    - [Step 4: Create config](#step-4-create-config)
+    - [Step 5: Configure your settings](#step-5-configure-your-settings)
+    - [Step 6: Run ULDAS](#step-6-run)
+    - [Unraid](#unraid)
+- [⚙️ Configuration](#configuration)
+  - [Expert variables](#expert-variables)
+  - [Model Size Guide](#model-size-guide)
+- [🌐 WebUI](#webui)
+- [📄 Supported File Formats](#supported-file-formats)
+- [⌨️ CLI Reference](#cli-reference)
+  - [Utility Commands](#utility-commands)
+  - [Logging & Output](#logging--output)
+  - [Paths & General](#paths--general)
+  - [Voice Activity Detection (VAD)](#voice-activity-detection-vad)
+  - [Device & Compute](#device--compute)
+  - [Confidence & Reprocessing](#confidence--reprocessing)
+  - [Tracking](#tracking)
+  - [Subtitle Processing](#subtitle-processing)
+  - [Timeouts](#timeouts)
+  - [Forced Subtitle Thresholds](#forced-subtitle-thresholds)
+  - [CLI ↔ Config File Mapping](#cli--config-file-mapping)
+- [🏞️ Example screenshots](#example-screenshots)
+  - [WebUI](#webuiss)
+  - [Audio Processing](#audio-processing)
+  - [Subtitle Processing](#subtitle-processing-1)
+- [⚠️ Need Help or have Feedback?](#need-help-or-have-feedback)
+- [❤️ Support the Project](#support-the-project)
+
+---
+
+<a id="installation"></a>
 ## 🛠️ Installation
 
-### 1️⃣ Download the script
-Clone the repository:
-```sh
-git clone https://github.com/netplexflix/ULDAS.git
-cd ULDAS
+<a id="step-1-install-docker"></a>
+#### Step 1: Install Docker
+
+1. **Download Docker Desktop** from [docker.com](https://www.docker.com/products/docker-desktop/)
+2. **Install and start Docker Desktop** on your computer
+3. **Verify installation**: Open a terminal/command prompt and type `docker --version` - you should see a version number
+
+<a id="step-2-create-docker-compose-file"></a>
+#### Step 2: Create Docker Compose File
+
+1. **Create a new folder** for ULDAS on your computer (e.g., `C:\ULDAS` or `/home/user/ULDAS`)
+2. **Download the `docker-compose.yml`** and place it in that folder, or manually create it by copy pasting this content:
+
+```yaml
+version: "3.8"
+services:
+  uldas:
+    container_name: uldas
+    image: netplexflix/uldas:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York # Set your timezone
+      - CRON_SCHEDULE=0 5 * * 5
+      # Examples:
+      #   "0 3 * * *"    = every day at 3:00 AM
+      #   "0 */6 * * *"  = every 6 hours
+      #   "0 5 * * 5"    = every Friday at 5:00 AM
+      # Alternative: use a simple hours interval instead of cron:
+      # - SCHEDULE_HOURS=24
+      # Leave all scheduler env vars empty or remove them to run once and exit.
+      #
+      # NOTE: CRON_SCHEDULE / SCHEDULE_HOURS are only used as initial defaults
+      # on first launch. Once saved to config.yml they can be edited live from
+      # the webUI Settings page (Scheduler section) without a container restart.
+    ports:
+      - "2119:2119"
+    volumes:
+      - ./config:/app/config
+      - /path/to/folder1:/folder1
+      - /path/to/folder2:/folder2
+      # Optional: mount custom temp directory:
+      # - /path/to/temp:/tmp/uldas
+    restart: unless-stopped
 ```
 
-![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Or simply download by pressing the green 'Code' button above and then 'Download Zip'.
-
-### 2️⃣ Install Dependencies
-- Ensure you have [Python](https://www.python.org/downloads/) installed (`>=3.11` recommended)
-- Open a Terminal in the script's directory
->[!TIP]
->Windows Users: <br/>
->Go to the script folder (where ULDAS.py is).</br>
->Right mouse click on an empty space in the folder and click `Open in Windows Terminal`
-- Install the required dependencies:
-```sh
-pip install -r requirements.txt
-```
-
----
-
-## 🐳 Docker
-
-ULDAS is available as a Docker image. The image supports both CPU and Nvidia GPUs.
-
-### Quick Start
-
-```sh
-docker run --rm --gpus all \
-  -v /path/to/config:/app/config \
-  -v /path/to/movies:/movies \
-  -v /path/to/tv:/tv \
-  netplexflix/uldas:latest
-```
-
-### Volume Mounts
+<a id="step-3-update"></a>
+#### Step 3: Update volumes, IDs, port and CRON Schedule
+- Volume Mounts:
 
 | Mount | Description |
-|-------|-------------|
+| --- | --- |
 | `/app/config` | Config file and tracking data (required) |
-| `/movies` | Your movies library |
-| `/tv` | Your TV shows library |
+| `/folder1` | e.g. Your movies library |
+| `/folder2` | e.g. Your TV shows library |
+| `/tmp/uldas` | optional mount for custom tmp directory |
+
 
 > [!NOTE]
-> Your `config.yml` paths need to match the paths inside your container (e.g. if you mount your movies in the container as `/media/movies` your path in your config should be `/media/movies`)
+> Your `config.yml` paths need to match the paths inside your container<br>
+> example:<br>
+> ```sh
+>     volumes:
+>       - ./config:/app/config
+>       - /media/movies:/folder1
+>       - /media/tv:/folder2
+> ```
 > Extra paths can be added as long as they are also listed in the config.
 
-### Environment Variables
+> [!IMPORTANT]
+> The format is: `your-actual-path:container-path`<br>
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUID` | `0` | User ID for file permissions |
-| `PGID` | `0` | Group ID for file permissions |
-| `NVIDIA_VISIBLE_DEVICES` | `all` | Used to specify specific Nvidia GPUs to use |
-| `NVIDIA_DRIVER_CAPABILITIES` | `all` | Used to specify specific Nvidia driver capabilities the container has access to |
+- **Set the timezone (`TZ`)**  e.g. `Europe/Brussels`, `America/New_York`,  `Asia/Tokyo`,...
+- **Update the CRON Schedule** Tip: [Crontab.Guru](https://crontab.guru/)
+  - `CRON_SCHEDULE` (and `SCHEDULE_HOURS`) are only consulted on first start. After that, edit the schedule live from the webUI Settings page → **Scheduler** section (between General and Advanced). You can switch between a simple hours interval and a CRON expression without restarting the container.
+  - By default ULDAS does **not** run immediately when the container starts — it waits for the next scheduled time (or a manual **Run Now** from the dashboard), so you have a chance to review your settings in the webUI first. If you prefer ULDAS to start processing as soon as the container is up, enable **Run on Startup** in the webUI Settings → **Scheduler** section (or set `run_on_startup: true` in `config.yml`).
+- **Update port to xxxx:2119** if you want to run the webUI on a different port than 2119.
 
-### Unraid
+<a id="step-4-create-config"></a>
+#### Step 4: Create a config
 
-ULDAS is available in Community Applications. Search for "ULDAS" or install manually using the template.
+1. Create a subfolder named `config` 
+2. Download `config/config.example.yml` and save it as `config.yml` in your config folder
 
+<a id="step-5-configure-your-settings"></a>
+#### Step 5: Configure Your Settings
+- See [⚙️ Configuration](#️configuration)
+
+<a id="step-6-run"></a>
+#### Step 6: Run ULDAS
+
+1. **Open a terminal/command prompt** in your ULDAS folder
+2. **Type this command** and press Enter:
+   ```bash
+   docker-compose up -d
+   ```
+3. **That's it!** The latest docker container will be pulled from Dockerhub.
+4. **Update**
+   ```bash
+   docker-compose pull
+   ```
+   
 ---
 
+<a id="unraid"></a>
+### Unraid
+
+ULDAS is available in Community Applications. Search for "ULDAS" or install manually using the template in [unraid/](./unraid/).
+
+***
+
+<a id="configuration"></a>
 ## ⚙️ Configuration
 Rename `config.example.yml` to `config.yml` and change the values where needed:
 
 - **path**: Main Paths for your media.
+- **ignore_tags**: List of substrings. Any file whose name contains one of these (case-insensitive, matched against the name without extension) is skipped. Useful for trailers, samples, featurettes. Example: `[-trailer, sample]`
 - **remux_to_mkv**: `true` remuxes non-MKV files so they can be processed too
 - **show_details**: `true` will show you more details of what's happening
 - **dry_run**: `true` will do a dry run (will show what it would do, without actually altering any files)
+- **run_on_startup**: `false` (default) — ULDAS will not run immediately when the container starts, giving you time to review settings in the webUI first. Set to `true` to run straight away on container start; subsequent runs then follow the configured schedule in either case.
 - **process_subtitles**: `true` will process undefined subtitle tracks
+- **process_external_subtitles**: `true` will process external subtitle files
 - **analyze_forced_subtitles**: `true` will analyze whether a subtitle track has "Forced Subtitles" or not
 - **detect_sdh_subtitles**: `true` will analyze whether a subtitle track has 'hearing impaired' support. (e.g.: [Dogs barking], [Narrator:],... )
 
+<a id="expert-variables"></a>
 ### Expert variables
-
-> [!TIP]
->You can create a config file with a few expert variables by using the following command:
->```sh
->python ULDAS.py --create-config
->```
 
 Only Change these if you know what you're doing.
 - **vad_filter**: Enables Voice Activity Detection to filter out silence and background noise before language analysis (Default: True)
@@ -119,6 +207,7 @@ Only Change these if you know what you're doing.
 - **reprocess_all** : `true` will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
 - **reprocess_all_subtitles**: `true` will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
 - **operation_timeout_seconds**: 600,  # 10 minutes
+- **temp_dir**: Change temporary directory for audio/subtitle extraction. Leave empty to use system default (/tmp)
 
 Forced subtitle detection thresholds.<br>
 Density-based:
@@ -133,30 +222,206 @@ Absolute count thresholds:
 - **forced_subtitle_min_count_threshold**: Below = likely forced
 - **forced_subtitle_max_count_threshold**: Above = likely full
 
+<a id="model-size-guide"></a>
 ### Model Size Guide
 
-* **tiny:** Fastest, least accurate
-* **base:** Good balance
-* **small:** More accurate, slower (used during development tests)
-* **medium:** Very accurate, much slower
-* **large:** Most accurate, very slow
+- **tiny:** Fastest, least accurate
+- **base:** Good balance
+- **small:** More accurate, slower (used during development tests)
+- **medium:** Very accurate, much slower
+- **large:** Most accurate, very slow
 
----
+***
 
-## 🚀 Usage
+<a id="webui"></a>
+## 🌐 WebUI
+You can access the webui via localhost:2119
+Here you can edit settings and check your log.
+[Screenshots](#webuiss)
 
-Run the script with:
-```sh
-python ULDAS.py
-```
+***
 
-> [!TIP]
-> Windows users can create a batch file for quick launching:
-> ```batch
-> "C:\Path\To\Python\python.exe" "Path\To\Script\ULDAS.py"
-> pause
-> ```
+<a id="supported-file-formats"></a>
+## 📄 Supported File Formats
+Always Processed:
+- **MKV files:** Primary target format
 
+With `remux_to_mkv: true`
+- MP4, AVI, MOV, WMV, FLV, WebM, M4V, M2TS, MTS, TS, VOB
+- Note: Original files are deleted after successful conversion
+
+External subtitle File Formats:
+- SRT, ASS, SSA, SUB, VTT, IDX
+
+***
+
+<a id="cli-reference"></a>
+## ⌨️ CLI Reference
+
+<a id="utility-commands"></a>
+### Utility Commands
+
+| Flag | Description |
+| --- | --- |
+| `--version` | Show the current ULDAS version and exit |
+| `--config PATH` | Path to the configuration file (default: `config/config.yml`) |
+| `--create-config` | Create a sample configuration file and exit |
+| `--find-mkv` | Locate MKVToolNix installation (Windows only) |
+| `--clear-tracking` | Clear all file processing tracking data and exit |
+| `--skip-update-check` | Skip checking for updates on startup |
+
+<a id="logging--output"></a>
+### Logging & Output
+
+| Flag | Description |
+| --- | --- |
+| `--verbose`, `-v` | Enable verbose/debug output (sets `show_details` to `true`) |
+| `--quiet`, `-q` | Suppress most console output (sets `show_details` to `false`) |
+| `--show-details` | Show detailed processing information |
+| `--no-show-details` | Hide detailed processing information |
+
+<a id="paths--general"></a>
+### Paths & General
+
+| Flag | Description |
+| --- | --- |
+| `--directory DIR [DIR ...]` | Override directory/directories to scan. Accepts multiple paths |
+| `--remux-to-mkv` | Remux non-MKV video files to MKV before processing |
+| `--no-remux-to-mkv` | Disable remuxing non-MKV files to MKV |
+| `--model {tiny,base,small,medium,large}` | Whisper model size to use for audio language detection |
+| `--dry-run` | Simulate all changes without modifying any files |
+| `--temp-dir DIR` | Override the temporary directory used for intermediate files |
+
+<a id="voice-activity-detection-vad"></a>
+### Voice Activity Detection (VAD)
+
+| Flag | Description |
+| --- | --- |
+| `--vad` | Enable VAD filter (default) |
+| `--no-vad` | Disable VAD filter |
+| `--vad-min-speech-duration-ms MS` | Minimum speech duration in milliseconds for VAD |
+| `--vad-max-speech-duration-s S` | Maximum speech duration in seconds for VAD |
+
+<a id="device--compute"></a>
+### Device & Compute
+
+| Flag | Description |
+| --- | --- |
+| `--device {auto,cpu,cuda}` | Device for Whisper inference |
+| `--compute-type {auto,int8,int8_float16,int16,float16,float32}` | Compute type for Whisper inference |
+| `--cpu-threads N` | Number of CPU threads (`0` = auto) |
+
+<a id="confidence--reprocessing"></a>
+### Confidence & Reprocessing
+
+| Flag | Description |
+| --- | --- |
+| `--confidence-threshold F` | Confidence threshold for audio language detection (`0.0`��`1.0`) |
+| `--reprocess-all` | Reprocess all audio tracks, even those already tagged |
+| `--force-reprocess` | Force reprocessing, ignoring the tracking cache entirely |
+
+<a id="tracking"></a>
+### Tracking
+
+| Flag | Description |
+| --- | --- |
+| `--tracking` | Enable file processing tracking (default) |
+| `--no-tracking` | Disable file processing tracking |
+
+<a id="subtitle-processing"></a>
+### Subtitle Processing
+
+| Flag | Description |
+| --- | --- |
+| `--process-subtitles` | Process embedded subtitle tracks |
+| `--no-process-subtitles` | Disable processing of embedded subtitle tracks |
+| `--process-external-subtitles` | Process external subtitle files |
+| `--no-process-external-subtitles` | Disable processing of external subtitle files |
+| `--analyze-forced` | Analyze and tag forced subtitles |
+| `--no-analyze-forced` | Disable forced subtitle analysis |
+| `--detect-sdh` | Detect and tag SDH (Subtitles for the Deaf and Hard of Hearing) |
+| `--no-sdh-detection` | Disable SDH subtitle detection |
+| `--subtitle-confidence-threshold F` | Confidence threshold for subtitle language detection (`0.0`–`1.0`) |
+| `--reprocess-all-subtitles` | Reprocess all subtitle tracks, even those already tagged |
+
+<a id="timeouts"></a>
+### Timeouts
+
+| Flag | Description |
+| --- | --- |
+| `--operation-timeout S` | Timeout in seconds for long operations such as full audio track extraction |
+
+<a id="forced-subtitle-thresholds"></a>
+### Forced Subtitle Thresholds
+
+| Flag | Description |
+| --- | --- |
+| `--forced-sub-low-coverage F` | Low coverage threshold (%) — below this, subtitles are likely forced |
+| `--forced-sub-high-coverage F` | High coverage threshold (%) — above this, subtitles are likely full |
+| `--forced-sub-low-density F` | Low density threshold (subtitles/min) — below this, likely forced |
+| `--forced-sub-high-density F` | High density threshold (subtitles/min) — above this, likely full |
+| `--forced-sub-min-count N` | Minimum subtitle count — below this, likely forced |
+| `--forced-sub-max-count N` | Maximum subtitle count — above this, likely full |
+
+<a id="cli--config-file-mapping"></a>
+### CLI ↔ Config File Mapping
+
+Every CLI option corresponds to a key in the YAML configuration file. CLI arguments always take precedence over config file values. For boolean options with toggle pairs (`--flag` / `--no-flag`), the positive flag wins if both are specified.
+
+| CLI Flag | Config Key | Default |
+| --- | --- | --- |
+| `--directory` | `path` | `["."]` |
+| `--remux-to-mkv` | `remux_to_mkv` | `false` |
+| `--show-details` | `show_details` | `true` |
+| `--model` | `whisper_model` | `base` |
+| `--dry-run` | `dry_run` | `false` |
+| `--temp-dir` | `temp_dir` | `""` |
+| `--vad` / `--no-vad` | `vad_filter` | `true` |
+| `--vad-min-speech-duration-ms` | `vad_min_speech_duration_ms` | `250` |
+| `--vad-max-speech-duration-s` | `vad_max_speech_duration_s` | `30` |
+| `--device` | `device` | `auto` |
+| `--compute-type` | `compute_type` | `auto` |
+| `--cpu-threads` | `cpu_threads` | `0` |
+| `--confidence-threshold` | `confidence_threshold` | `0.9` |
+| `--reprocess-all` | `reprocess_all` | `false` |
+| `--force-reprocess` | `force_reprocess` | `false` |
+| `--tracking` / `--no-tracking` | `use_tracking` | `true` |
+| `--process-subtitles` | `process_subtitles` | `false` |
+| `--process-external-subtitles` | `process_external_subtitles` | `false` |
+| `--analyze-forced` | `analyze_forced_subtitles` | `false` |
+| `--detect-sdh` / `--no-sdh-detection` | `detect_sdh_subtitles` | `true` |
+| `--subtitle-confidence-threshold` | `subtitle_confidence_threshold` | `0.85` |
+| `--reprocess-all-subtitles` | `reprocess_all_subtitles` | `false` |
+| `--operation-timeout` | `operation_timeout_seconds` | `600` |
+| `--forced-sub-low-coverage` | `forced_subtitle_low_coverage_threshold` | `25.0` |
+| `--forced-sub-high-coverage` | `forced_subtitle_high_coverage_threshold` | `50.0` |
+| `--forced-sub-low-density` | `forced_subtitle_low_density_threshold` | `3.0` |
+| `--forced-sub-high-density` | `forced_subtitle_high_density_threshold` | `8.0` |
+| `--forced-sub-min-count` | `forced_subtitle_min_count_threshold` | `50` |
+| `--forced-sub-max-count` | `forced_subtitle_max_count_threshold` | `300` |
+
+***
+
+<a id="example-screenshots"></a>
+## 🏞️ Example screenshots:
+<a id="webuiss"></a>
+![Image](https://github.com/user-attachments/assets/12b0d51a-fff8-4f48-8b75-695bfd86691e)
+![Image](https://github.com/user-attachments/assets/e848c31e-dfb2-4886-8596-bf6f2695fe3d)
+![Image](https://github.com/user-attachments/assets/d5fde867-e631-4419-88d6-4af5b29bf8aa)
+
+<a id="audio-processing"></a>
+### Audio Processing
+<img width="926" height="428" alt="Image" src="https://github.com/user-attachments/assets/202d77c9-02ed-4541-ab9b-84d234248961" /><br>
+- example run with reprocess_all: true: Samsara is indeed a documentary without spoken dialogue.
+
+<a id="subtitle-processing-1"></a>
+### Subtitle Processing
+<img width="756" height="142" alt="Image" src="https://github.com/user-attachments/assets/4b1d69ab-f7e7-462e-a7b7-e8f7ec9e89c4" />
+
+***
+
+<a id="need-help-or-have-feedback"></a>
+### ⚠️ Need Help or have Feedback?
 > [!NOTE]
 > ### Audio Tracks
 > A warning will be given at the end of a run for any files that were marked as 'zxx' (no linguistic content).<br>
@@ -169,34 +434,13 @@ python ULDAS.py
 >
 > ### Failed Files
 > If a file is marked as failed, it is likely corrupt. Manually remux or replace it.
+> Renaming of external subtitle files can fail if the targetted name is already in use by another file, or if the file is set to read-only.
 
----
-
-## 📄 Supported File Formats
-Always Processed:
-* **MKV files:** Primary target format
-
-With `remux_to_mkv: true`
-* MP4, AVI, MOV, WMV, FLV, WebM, M4V, M2TS, MTS, TS, VOB
-* Note: Original files are deleted after successful conversion
-
----
-
-## 🏞️ Example run summary:
-### Audio Processing
-<img width="926" height="428" alt="Image" src="https://github.com/user-attachments/assets/202d77c9-02ed-4541-ab9b-84d234248961" /><br>
-* example run with reprocess_all: true: Samsara is indeed a documentary without spoken dialogue.
-
-### Subtitle Processing
-<img width="756" height="142" alt="Image" src="https://github.com/user-attachments/assets/4b1d69ab-f7e7-462e-a7b7-e8f7ec9e89c4" />
-
----
-
-### ⚠️ Need Help or have Feedback?
 - Join our [Discord](https://discord.gg/VBNUJd7tx3)
 
----
+***
 
+<a id="support-the-project"></a>
 ### ❤️ Support the Project
 If you find this project useful, starring the repository is appreciated! ⭐<br>
 Big thanks to [DaLeberkasPepi](https://github.com/DaLeberkasPepi) for extensive testing.
