@@ -22,4 +22,13 @@ services:
       - /path/to/folder2:/folder2
       # Optional: mount custom temp directory:
       # - /path/to/temp:/tmp/uldas
+    # Optional: NVIDIA GPU acceleration (requires the NVIDIA Container Toolkit).
+    # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     restart: unless-stopped

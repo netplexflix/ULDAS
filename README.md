@@ -109,8 +109,20 @@ services:
       - /path/to/folder2:/folder2
       # Optional: mount custom temp directory:
       # - /path/to/temp:/tmp/uldas
+    # Optional: NVIDIA GPU acceleration (requires the NVIDIA Container Toolkit).
+    # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     restart: unless-stopped
 ```
+
+> [!NOTE]
+> **GPU support:** ULDAS uses an NVIDIA GPU automatically when the container is started with the NVIDIA runtime (uncomment the `deploy` block above, or add `--runtime=nvidia` on Unraid). Without one it runs on CPU — slower, but fully functional. Intel and AMD GPUs are not supported by the Whisper backend (CTranslate2), so those systems run on CPU.
 
 <a id="step-3-update"></a>
 #### Step 3: Update volumes, IDs, port and CRON Schedule

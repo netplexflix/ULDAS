@@ -176,11 +176,13 @@ class MKVLanguageDetector:
     def _determine_device(self):
         if self.config.device != "auto":
             return self.config.device
+        # CTranslate2 is the inference backend (CPU / CUDA only), so ask it
+        # directly. Any failure (missing driver libs, no NVIDIA runtime) → CPU.
         try:
-            import torch
-            if torch.cuda.is_available():
+            import ctranslate2
+            if ctranslate2.get_cuda_device_count() > 0:
                 return "cuda"
-        except ImportError:
+        except Exception:
             pass
         return "cpu"
 
