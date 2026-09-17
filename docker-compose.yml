@@ -22,7 +22,9 @@ services:
       - /path/to/folder2:/folder2
       # Optional: mount custom temp directory:
       # - /path/to/temp:/tmp/uldas
-    # Optional: NVIDIA GPU acceleration (requires the NVIDIA Container Toolkit).
+    # Optional: NVIDIA GPU acceleration. Requires the NVIDIA Container Toolkit
+    # to be installed on the host first (Unraid: the "Nvidia-Driver" plugin):
+    # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
     # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
     # deploy:
     #   resources:
