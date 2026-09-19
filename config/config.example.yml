@@ -4,6 +4,7 @@ path:
 ignore_tags:
   - -trailer
   - sample
+ignore_tags_match_dirs: false
 remux_to_mkv: true
 show_details: false
 dry_run: true

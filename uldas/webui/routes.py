@@ -132,6 +132,14 @@ CONFIG_OPTIONS = [
         "advanced": False,
     },
     {
+        "key": "ignore_tags_match_dirs",
+        "type": "bool",
+        "default": False,
+        "label": "Apply Ignore Tags to Directories",
+        "description": "Also skip any directory whose name contains one of the Ignore Tags (case-insensitive). Everything inside a matching directory is ignored.",
+        "advanced": False,
+    },
+    {
         "key": "remux_to_mkv",
         "type": "bool",
         "default": False,

@@ -25,6 +25,7 @@ class Config:
         # ── Paths & general ──────────────────────────────────────────────
         self.path: list[str] = ["."]
         self.ignore_tags: list[str] = []
+        self.ignore_tags_match_dirs: bool = False
         self.remux_to_mkv: bool = False
         self.show_details: bool = True
         self.whisper_model: str = "small"
@@ -121,6 +122,7 @@ class Config:
         sample = {
             "path": ["P:/Movies", "P:/TV"],
             "ignore_tags": [],
+            "ignore_tags_match_dirs": False,
             "remux_to_mkv": True,
             "show_details": False,
             "whisper_model": "small",

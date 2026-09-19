@@ -85,7 +85,11 @@ class MKVLanguageDetector:
             config_dir="config", read_only=config.dry_run,
         )
 
-        removed = self.language_index.prune_ignored_tags(config.ignore_tags)
+        removed = self.language_index.prune_ignored_tags(
+            config.ignore_tags,
+            match_dirs=bool(config.ignore_tags_match_dirs),
+            roots=list(config.path or []),
+        )
         if removed["files"] or removed["ext_subs"]:
             logger.info(
                 "Pruned %d video + %d ext-sub language-index entries "
@@ -234,6 +238,12 @@ class MKVLanguageDetector:
                 process_subtitles=self.config.process_subtitles,
             )
 
+        # Lowercase the ignore-tag list once; matched against filename
+        # stems and (when enabled) directory names in the walk below.
+        tags_lower = [t.lower() for t in (self.config.ignore_tags or [])
+                      if isinstance(t, str) and t]
+        match_dirs = bool(self.config.ignore_tags_match_dirs and tags_lower)
+
         video_files: list[Path] = []
         sub_files: list[Path] = []
         seen_paths: set[str] = set()
@@ -242,6 +252,7 @@ class MKVLanguageDetector:
         sub_skipped = 0
         new_already_labeled = 0
         dirs_scanned = 0
+        dirs_skipped = 0
         last_report = time.monotonic()
         report_interval = 5.0
 
@@ -257,6 +268,14 @@ class MKVLanguageDetector:
             for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
                 dirs_scanned += 1
 
+                # Prune ignored directories in place so os.walk never
+                # descends into them.
+                if match_dirs:
+                    keep = [d for d in dirnames
+                            if not any(tag in d.lower() for tag in tags_lower)]
+                    dirs_skipped += len(dirnames) - len(keep)
+                    dirnames[:] = keep
+
                 for filename in filenames:
                     dot_pos = filename.rfind(".")
                     if dot_pos <= 0:
@@ -268,10 +287,9 @@ class MKVLanguageDetector:
                     if not (is_video or is_sub):
                         continue
 
-                    if self.config.ignore_tags:
+                    if tags_lower:
                         stem_lower = filename[:dot_pos].lower()
-                        if any(tag and tag.lower() in stem_lower
-                               for tag in self.config.ignore_tags):
+                        if any(tag in stem_lower for tag in tags_lower):
                             if is_video:
                                 video_skipped += 1
                             else:
@@ -337,16 +355,18 @@ class MKVLanguageDetector:
 
         if self.config.show_details:
             logger.info(
-                "Scan complete: %d dirs, %d new videos (%d skipped), "
+                "Scan complete: %d dirs (%d skipped), %d new videos (%d skipped), "
                 "%d new subs (%d skipped, %d already labeled)",
-                dirs_scanned, len(video_files), video_skipped,
+                dirs_scanned, dirs_skipped, len(video_files), video_skipped,
                 len(sub_files), sub_skipped, new_already_labeled,
             )
         else:
             parts = [
                 f"{dirs_scanned} dirs",
-                f"{len(video_files)} new videos",
             ]
+            if dirs_skipped:
+                parts.append(f"{dirs_skipped} dirs skipped")
+            parts.append(f"{len(video_files)} new videos")
             if video_skipped:
                 parts.append(f"{video_skipped} skipped")
             if scan_subs:
@@ -1232,6 +1252,13 @@ class MKVLanguageDetector:
 
         ignore_tags = [t.lower() for t in (self.config.ignore_tags or [])
                        if isinstance(t, str) and t]
+        match_dirs = bool(self.config.ignore_tags_match_dirs and ignore_tags)
+        root_prefixes: List[str] = []
+        if match_dirs:
+            from uldas.language_index import (
+                _normalize_path_prefixes, path_has_ignored_dir,
+            )
+            root_prefixes = _normalize_path_prefixes(list(self.config.path or []))
 
         actionable: List[Path] = []
         missing = 0
@@ -1247,6 +1274,11 @@ class MKVLanguageDetector:
             if ignore_tags:
                 stem = fp.stem.lower()
                 if any(tag in stem for tag in ignore_tags):
+                    ignored += 1
+                    continue
+                if match_dirs and path_has_ignored_dir(
+                    os.path.abspath(str(fp)), ignore_tags, root_prefixes,
+                ):
                     ignored += 1
                     continue
             actionable.append(fp)

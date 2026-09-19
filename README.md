@@ -197,6 +197,7 @@ Rename `config.example.yml` to `config.yml` and change the values where needed:
 
 - **path**: Main Paths for your media.
 - **ignore_tags**: List of substrings. Any file whose name contains one of these (case-insensitive, matched against the name without extension) is skipped. Useful for trailers, samples, featurettes. Example: `[-trailer, sample]`
+- **ignore_tags_match_dirs**: `true` also skips any directory (and everything inside it) whose name contains one of the `ignore_tags`. The scan directories themselves are never matched. Default `false`.
 - **remux_to_mkv**: `true` remuxes non-MKV files so they can be processed too
 - **show_details**: `true` will show you more details of what's happening
 - **dry_run**: `true` will do a dry run (will show what it would do, without actually altering any files)

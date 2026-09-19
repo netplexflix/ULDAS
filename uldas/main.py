@@ -542,6 +542,7 @@ def _run_processing(config: Config, skip_update_check: bool = False,
                 ignore_tags=list(config.ignore_tags or []),
                 cancel_check=(state.is_stopped if state is not None else None),
                 show_details=config.show_details,
+                ignore_tags_match_dirs=bool(config.ignore_tags_match_dirs),
             )
         except Exception as exc:
             msg = f"Language indexing failed: {exc}"
@@ -559,6 +560,8 @@ def _run_processing(config: Config, skip_update_check: bool = False,
         print(f"  External subs indexed:     {result['external_sub_files_indexed']}")
         if result.get("files_skipped"):
             print(f"  Skipped (ignore_tags):     {result['files_skipped']}")
+        if result.get("dirs_skipped"):
+            print(f"  Skipped dirs (ignore_tags): {result['dirs_skipped']}")
         print(f"  Unique audio languages:    {len(result['counts']['audio'])}")
         print(f"  Unique embedded sub langs: {len(result['counts']['embedded_subs'])}")
         print(f"  Unique external sub langs: {len(result['counts']['external_subs'])}")
