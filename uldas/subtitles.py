@@ -594,7 +594,29 @@ def update_subtitle_metadata(
     is_sdh: bool = False,
     dry_run: bool = False,
     show_details: bool = False,
+    is_mp4: bool = False,
+    expected_count: Optional[int] = None,
 ) -> bool:
+    """Write language (and, for MKV, name + forced flag) to a subtitle track.
+
+    With ``is_mp4`` the tag is patched in place via :mod:`uldas.mp4`;
+    MP4 has no track name or forced flag, so only the language is set.
+    """
+    if is_mp4:
+        lang3 = convert_iso639_1_to_2(language_code.split("-")[0].lower())
+        if dry_run:
+            print(f"[DRY RUN] Would update subtitle track {track_index}: "
+                  f"language={lang3} (MP4: language only)")
+            return True
+        from uldas import mp4 as mp4_mod
+        ok = mp4_mod.set_track_language(
+            file_path, "subtitle", track_index, lang3, expected_count,
+        )
+        if ok and show_details:
+            logger.info("Updated subtitle track %d: lang=%s (MP4 in place; "
+                        "name/forced flag not supported)", track_index, lang3)
+        return ok
+
     name_parts = [get_language_name(language_code)]
     if is_forced:
         name_parts.append("[Forced]")

@@ -14,17 +14,22 @@ from typing import Callable, List, Dict, Optional, Tuple
 from faster_whisper import WhisperModel
 
 from uldas.config import Config
-from uldas.constants import LANGUAGE_CODES, VIDEO_EXTENSIONS, EXTERNAL_SUBTITLE_EXTENSIONS
+from uldas.constants import (
+    LANGUAGE_CODES, EXTERNAL_SUBTITLE_EXTENSIONS, MP4_EXTENSIONS,
+    scan_video_extensions,
+)
 from uldas.tracking import ProcessingTracker
 from uldas.tools import find_executable
 from uldas.utils import (
     setup_cpu_limits,
     limit_subprocess_resources,
     normalize_language_code,
+    convert_iso639_1_to_2,
 )
 from uldas import audio as audio_mod
 from uldas import subtitles as sub_mod
 from uldas import external_subtitles as ext_sub_mod
+from uldas import mp4 as mp4_mod
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +159,23 @@ class MKVLanguageDetector:
             t.start()
 
         try:
+            try:
+                return self._load_whisper(device, compute_type, cpu_threads)
+            except Exception as exc:
+                # A cached model.bin that is really a symlink stub (see
+                # _find_stub_model_cache) makes every load attempt fail
+                # with a nonsense binary version.  Wipe it and re-download
+                # once before giving up.
+                if not self._repair_stub_model_cache(exc):
+                    raise
+                return self._load_whisper(device, compute_type, cpu_threads)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialise Whisper: {exc}") from exc
+        finally:
+            stop.set()
+
+    def _load_whisper(self, device, compute_type, cpu_threads):
+        try:
             model = WhisperModel(
                 self.config.whisper_model,
                 device=device,
@@ -167,14 +189,68 @@ class MKVLanguageDetector:
             return model
         except Exception as exc:
             logger.warning("Primary init failed (%s), falling back to CPU", exc)
+            model = WhisperModel(self.config.whisper_model, device="cpu")
+            logger.info("✓ Fallback (CPU) initialisation successful")
+            return model
+
+    def _find_stub_model_cache(self) -> Optional[Path]:
+        """Return the Hugging Face cache dir of the configured model if its
+        ``model.bin`` is an ``XSym`` stub instead of real weights.
+
+        The HF cache links ``snapshots/<rev>/model.bin`` to ``blobs/<sha>``.
+        On a bind mount that can't hold symlinks Docker writes a small text
+        file starting with ``XSym`` in its place; read back through a
+        different mount that stub is served as a plain file and CTranslate2
+        reports an absurd "model binary version".
+        """
+        name = self.config.whisper_model
+        if os.path.isdir(name):
+            return None            # local model directory, not the HF cache
+        try:
+            from faster_whisper.utils import _MODELS
+            repo_id = _MODELS.get(name, name)
+        except Exception:
+            repo_id = name
+        if "/" not in repo_id:
+            repo_id = f"Systran/faster-whisper-{repo_id}"
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+            cache_root = Path(HF_HUB_CACHE)
+        except Exception:
+            cache_root = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+        model_dir = cache_root / f"models--{repo_id.replace('/', '--')}"
+        for model_bin in model_dir.glob("snapshots/*/model.bin"):
             try:
-                model = WhisperModel(self.config.whisper_model, device="cpu")
-                logger.info("✓ Fallback (CPU) initialisation successful")
-                return model
-            except Exception as fb_exc:
-                raise RuntimeError(f"Failed to initialise Whisper: {fb_exc}") from fb_exc
-        finally:
-            stop.set()
+                with open(model_bin, "rb") as fh:
+                    if fh.read(4) == b"XSym":
+                        return model_dir
+            except OSError:
+                continue
+        return None
+
+    def _repair_stub_model_cache(self, exc: Exception) -> bool:
+        """If *exc* came from a stub ``model.bin``, delete that model's
+        cache dir so the next load re-downloads it.  Returns True when a
+        retry is worthwhile."""
+        if "model binary version" not in str(exc):
+            return False
+        model_dir = self._find_stub_model_cache()
+        if model_dir is None:
+            return False
+        logger.warning(
+            "Cached Whisper model at %s is a symlink stub (XSym), not real "
+            "weights — the cache volume was written through a mount that "
+            "can't store symlinks. Deleting it and re-downloading. If this "
+            "repeats, set HF_HUB_DISABLE_SYMLINKS=1 in the container "
+            "environment.", model_dir,
+        )
+        try:
+            import shutil
+            shutil.rmtree(model_dir)
+        except OSError as rm_exc:
+            logger.error("Could not delete %s: %s", model_dir, rm_exc)
+            return False
+        return True
 
     # ── Device helpers ───────────────────────────────────────────────────
     def _determine_device(self):
@@ -211,9 +287,9 @@ class MKVLanguageDetector:
         by ``prune_missing_files`` to drop stale tracker entries without
         issuing any extra filesystem calls.
         """
-        video_exts: set[str] = {".mkv"}
-        if self.config.remux_to_mkv:
-            video_exts.update(VIDEO_EXTENSIONS)
+        video_exts = scan_video_extensions(
+            self.config.remux_to_mkv, self.config.mp4_support,
+        )
         sub_exts = EXTERNAL_SUBTITLE_EXTENSIONS
 
         scan_subs = self.config.process_external_subtitles
@@ -539,7 +615,10 @@ class MKVLanguageDetector:
             return cached
 
         mkvmerge = find_executable("mkvmerge")
-        if not mkvmerge:
+        if not mkvmerge or self._is_inplace_mp4(file_path):
+            # For in-place MP4 work stick to ffprobe so stream indices and
+            # codec names (e.g. mov_text) are the native ones the ffmpeg
+            # extraction and the mp4 patcher both expect.
             info = self._get_mkv_info_ffprobe(file_path)
         else:
             try:
@@ -679,12 +758,27 @@ class MKVLanguageDetector:
             file_path, track_idx, stream_idx, self.config, max_retries,
         )
 
+    def _is_inplace_mp4(self, file_path: Path) -> bool:
+        """True when *file_path* is an MP4/M4V that should be labeled in
+        place (MP4 support on) rather than remuxed or skipped."""
+        return bool(self.config.mp4_support) and mp4_mod.is_mp4(file_path)
+
     # ── Audio metadata update ────────────────────────────────────────────
     def update_mkv_language(self, file_path: Path, track_index: int,
                             language_code: str, dry_run: bool = False) -> bool:
         if dry_run:
             print(f"[DRY RUN] Would update track {track_index} → {language_code}")
             return True
+        if self._is_inplace_mp4(file_path):
+            lang3 = convert_iso639_1_to_2(language_code.split("-")[0].lower())
+            ok = mp4_mod.set_track_language(
+                file_path, "audio", track_index, lang3,
+                expected_count=len(self.find_all_audio_tracks(file_path)),
+            )
+            if ok and self.config.show_details:
+                logger.info("Updated audio track %d → %s (MP4 in place)",
+                            track_index, lang3)
+            return ok
         try:
             cmd = [
                 self.mkvpropedit, str(file_path),
@@ -720,6 +814,15 @@ class MKVLanguageDetector:
         if not tracks:
             return results
 
+        # MP4 can only take a language tag — no track name, no forced
+        # flag — so forced/SDH analysis would be wasted effort there.
+        is_mp4 = self._is_inplace_mp4(file_path)
+        if is_mp4 and self.config.show_details and (
+                self.config.analyze_forced_subtitles or self.config.detect_sdh_subtitles):
+            logger.info("Skipping forced/SDH analysis for %s: MP4 only "
+                        "supports a language tag", file_path.name)
+        expected_sub_count = len(self.find_all_subtitle_tracks(file_path)) if is_mp4 else None
+
         for sub_idx, stream_info, stream_idx, cur_lang in tracks:
             subtitle_path = None
             try:
@@ -752,16 +855,18 @@ class MKVLanguageDetector:
                     continue
 
                 is_forced = False
-                if self.config.analyze_forced_subtitles:
+                if self.config.analyze_forced_subtitles and not is_mp4:
                     is_forced = self._detect_forced(file_path, sub_idx, stream_idx, subtitle_path)
 
                 is_sdh = False
-                if self.config.detect_sdh_subtitles and subtitle_path.suffix.lower() != ".sup":
+                if (self.config.detect_sdh_subtitles and not is_mp4
+                        and subtitle_path.suffix.lower() != ".sup"):
                     is_sdh = sub_mod.detect_sdh_subtitles(subtitle_path)
 
                 ok = sub_mod.update_subtitle_metadata(
                     self.mkvpropedit, file_path, sub_idx, code,
                     is_forced, is_sdh, self.config.dry_run, self.config.show_details,
+                    is_mp4=is_mp4, expected_count=expected_sub_count,
                 )
                 if ok:
                     results["processed_subtitle_tracks"].append({
@@ -971,7 +1076,8 @@ class MKVLanguageDetector:
         # Remux
         mkv_path = file_path
         original_audio_langs: Dict[int, str] = {}
-        if self.config.remux_to_mkv and file_path.suffix.lower() != ".mkv":
+        if (self.config.remux_to_mkv and file_path.suffix.lower() != ".mkv"
+                and not self._is_inplace_mp4(file_path)):
             # Save defined audio language tags — ffmpeg remux can lose them
             orig_info = self.get_mkv_info(file_path)
             undef_langs = {"und", "unknown", "undefined", "undetermined", ""}
@@ -1169,6 +1275,7 @@ class MKVLanguageDetector:
                 from uldas.language_index import _probe_track_langs
                 audio_codes, sub_codes = _probe_track_langs(
                     self.ffprobe, mkv_path, mkvmerge=self.mkvmerge,
+                    mp4_inplace=bool(self.config.mp4_support),
                 )
                 self.language_index.update_file(mkv_path, audio_codes, sub_codes)
                 if results["was_remuxed"] and str(file_path) != str(mkv_path):
@@ -1260,6 +1367,13 @@ class MKVLanguageDetector:
             )
             root_prefixes = _normalize_path_prefixes(list(self.config.path or []))
 
+        # The index may hold entries for containers the current settings
+        # no longer cover (e.g. MP4s indexed while MP4 support was on);
+        # those can't be labeled with the tools this run would use.
+        video_exts = scan_video_extensions(
+            self.config.remux_to_mkv, self.config.mp4_support,
+        )
+
         actionable: List[Path] = []
         missing = 0
         ignored = 0
@@ -1270,6 +1384,9 @@ class MKVLanguageDetector:
                     continue
             except OSError:
                 missing += 1
+                continue
+            if fp.suffix.lower() not in video_exts:
+                ignored += 1
                 continue
             if ignore_tags:
                 stem = fp.stem.lower()
@@ -1285,8 +1402,8 @@ class MKVLanguageDetector:
 
         if missing or ignored:
             logger.info(
-                "process_files filtering: %d missing, %d ignored (ignore_tags), "
-                "%d to process",
+                "process_files filtering: %d missing, %d ignored (ignore_tags / "
+                "unsupported container), %d to process",
                 missing, ignored, len(actionable),
             )
 

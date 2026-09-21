@@ -102,6 +102,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Remux non-MKV video files to MKV before processing (config: remux_to_mkv)")
     p.add_argument("--no-remux-to-mkv", action="store_true", default=None,
                    help="Disable remuxing non-MKV files to MKV")
+    p.add_argument("--mp4-support", action="store_true", default=None,
+                   help="Label MP4/M4V files in place instead of remuxing or skipping them (config: mp4_support)")
+    p.add_argument("--no-mp4-support", action="store_true", default=None,
+                   help="Disable in-place MP4/M4V labeling")
     p.add_argument("--show-details", action="store_true", default=None,
                    help="Show detailed processing information (config: show_details)")
     p.add_argument("--no-show-details", action="store_true", default=None,
@@ -217,6 +221,11 @@ def _apply_cli_overrides(config: Config, args) -> None:
         config.remux_to_mkv = True
     elif args.no_remux_to_mkv:
         config.remux_to_mkv = False
+
+    if args.mp4_support:
+        config.mp4_support = True
+    elif args.no_mp4_support:
+        config.mp4_support = False
 
     if args.show_details:
         config.show_details = True
@@ -539,6 +548,7 @@ def _run_processing(config: Config, skip_update_check: bool = False,
                 directories=list(config.path),
                 output_path=out_path,
                 include_non_mkv_video=bool(config.remux_to_mkv),
+                include_mp4=bool(config.mp4_support),
                 ignore_tags=list(config.ignore_tags or []),
                 cancel_check=(state.is_stopped if state is not None else None),
                 show_details=config.show_details,

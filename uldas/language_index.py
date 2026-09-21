@@ -11,7 +11,8 @@ from typing import Callable, Optional
 
 from uldas.constants import (
     EXTERNAL_SUBTITLE_EXTENSIONS,
-    VIDEO_EXTENSIONS,
+    MP4_EXTENSIONS,
+    scan_video_extensions,
 )
 from uldas import external_subtitles as ext_sub_mod
 from uldas.tools import find_executable
@@ -24,9 +25,17 @@ INDEX_FILENAME = "language_index.json"
 
 # ── Probe helper ─────────────────────────────────────────────────────────
 def _probe_track_langs(ffprobe: str, file_path: Path,
-                       mkvmerge: Optional[str] = None
+                       mkvmerge: Optional[str] = None,
+                       mp4_inplace: bool = False,
                        ) -> "tuple[list[str], list[str]]":
-    """Return ``(audio_codes, subtitle_codes)`` for *file_path*."""
+    """Return ``(audio_codes, subtitle_codes)`` for *file_path*.
+
+    With ``mp4_inplace`` the MP4 family is probed with ffprobe only, so
+    the index sees the same track classification the in-place labeler
+    works from.
+    """
+    if mp4_inplace and file_path.suffix.lower() in MP4_EXTENSIONS:
+        mkvmerge = None
     if mkvmerge:
         try:
             r = subprocess.run(
@@ -408,6 +417,7 @@ def build_language_index(
     output_path: str,
     include_non_mkv_video: bool = False,
     ignore_tags: Optional[list] = None,
+    include_mp4: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
     show_details: bool = False,
     ignore_tags_match_dirs: bool = False,
@@ -438,9 +448,7 @@ def build_language_index(
         if removed_files or removed_ext:
             idx._dirty = True
 
-    video_exts: set = {".mkv"}
-    if include_non_mkv_video:
-        video_exts.update(VIDEO_EXTENSIONS)
+    video_exts: set = scan_video_extensions(include_non_mkv_video, include_mp4)
     sub_exts: set = EXTERNAL_SUBTITLE_EXTENSIONS
 
     # Lowercase the ignore-tag list once so we can match against the
@@ -507,6 +515,7 @@ def build_language_index(
                 if ext in video_exts:
                     audio_codes, sub_codes = _probe_track_langs(
                         ffprobe, path, mkvmerge=mkvmerge,
+                        mp4_inplace=include_mp4,
                     )
                     videos_indexed += 1
                     idx.update_file(path, audio_codes, sub_codes)
@@ -540,6 +549,7 @@ def build_language_index(
     snap = idx.snapshot()
     snap["duration_seconds"] = round(time.monotonic() - started, 1)
     snap["include_non_mkv_video"] = bool(include_non_mkv_video)
+    snap["include_mp4"] = bool(include_mp4)
     snap["video_files_indexed"] = videos_indexed
     snap["external_sub_files_indexed"] = ext_subs_indexed
     snap["files_skipped"] = files_skipped

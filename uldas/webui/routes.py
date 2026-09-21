@@ -144,7 +144,15 @@ CONFIG_OPTIONS = [
         "type": "bool",
         "default": False,
         "label": "Remux to MKV",
-        "description": "Remux non-MKV video files (MP4, AVI, etc.) to MKV format before processing. The original file is replaced.",
+        "description": "Remux non-MKV video files like AVI, MOV, TS, etc. (and MP4/M4V unless 'MP4 Support' is enabled) to MKV format before processing. The original file is replaced.",
+        "advanced": False,
+    },
+    {
+        "key": "mp4_support",
+        "type": "bool",
+        "default": False,
+        "label": "MP4 Support",
+        "description": "Label audio and embedded subtitle languages directly inside .mp4/.m4v files, without remuxing. Only the language tag can be written: subtitle track names and forced flags are not supported by MP4. When enabled, 'Remux to MKV' no longer remuxes .mp4/.m4v files.",
         "advanced": False,
     },
     {

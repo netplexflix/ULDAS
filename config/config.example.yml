@@ -6,6 +6,7 @@ ignore_tags:
   - sample
 ignore_tags_match_dirs: false
 remux_to_mkv: true
+mp4_support: false
 show_details: false
 dry_run: true
 run_on_startup: false
