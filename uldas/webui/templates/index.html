@@ -1510,7 +1510,7 @@ document.querySelectorAll('.nav-links a').forEach(a => {
 
         if (page === 'dashboard') { fetchStats(); fetchTimeSeries(); fetchLanguageIndex(); }
         if (page === 'settings' && configOptions.length === 0) fetchConfig();
-        if (page === 'log' && logEntries.length === 0) fetchLog();
+        if (page === 'log' && (logEntries.length === 0 || _logStale)) fetchLog();
     });
 });
 
@@ -2545,12 +2545,25 @@ document.getElementById('log-search').addEventListener('input', function() {
     scheduleRender();
 });
 
-async function fetchLog() {
+async function fetchLog(opts) {
+    // Live refreshes keep the user's view: expanded rows + column widths.
+    const preserve = !!(opts && opts.preserve);
+    const keepRows = preserve ? logRenderedCount : 0;
+    const keepWidths = preserve
+        ? Array.from(document.querySelectorAll('.log-table colgroup col')).map(c => c.style.width)
+        : null;
     try {
         const res = await fetch('/api/log');
         if (!res.ok) return;
         logEntries = await res.json();
+        _logStale = false;
         renderLog();
+        if (preserve) {
+            const target = Math.min(keepRows, logFiltered.length);
+            while (logRenderedCount < target) loadMoreRows();
+            const cols = document.querySelectorAll('.log-table colgroup col');
+            keepWidths.forEach((w, i) => { if (w && cols[i]) cols[i].style.width = w; });
+        }
     } catch (e) {
         console.error('Failed to fetch log', e);
     }
@@ -2710,6 +2723,27 @@ async function fetchStatus() {
 }
 
 let _previousStatus = null;
+let _lastDataVersion = null;
+let _logStale = false;
+
+// Re-fetch whatever data-backed view is on screen. Pages that aren't
+// visible either refetch on nav click (dashboard) or get flagged stale
+// (log) so the next visit picks up the new entries.
+function refreshLiveData() {
+    const active = document.querySelector('.page.active');
+    const page = active ? active.id : '';
+    if (page === 'page-dashboard') {
+        fetchStats();
+        fetchTimeSeries();
+        fetchLanguageIndex();
+    }
+    if (page === 'page-log') {
+        fetchLog({ preserve: true });
+    } else if (logEntries.length > 0) {
+        _logStale = true;
+    }
+}
+
 function updateStatusUI(data) {
     const dot = document.getElementById('status-dot');
     const text = document.getElementById('status-text');
@@ -2722,17 +2756,29 @@ function updateStatusUI(data) {
     const btnIndex = document.getElementById('btn-index-languages');
     const reprocessLangSelect = document.getElementById('reprocess-language-select');
 
+    // Refresh stats / log whenever the tracking files change on disk
+    // (the tracker checkpoints every 25 files during a run). The first
+    // poll only records the version — page load already fetched it all.
+    let needsRefresh = false;
+    if (data.data_version != null && data.data_version !== _lastDataVersion) {
+        needsRefresh = _lastDataVersion !== null;
+        _lastDataVersion = data.data_version;
+    }
+
     // Detect a run that just finished — refresh language-index-backed
     // widgets so the dashboard chart and the dropdown pick up any new
     // counts produced by Index Languages or Reprocess By Language.
+    // Also force a stats/log refresh in case two saves landed within
+    // the filesystem's mtime resolution and the version didn't move.
     if (_previousStatus === 'running'
             && data.status && data.status !== 'running' && data.status !== 'stopping') {
-        fetchLanguageIndex();
+        needsRefresh = true;
         loadReprocessLanguages();
         refreshIndexStatus();
         clearMaintenanceAction();
     }
     _previousStatus = data.status;
+    if (needsRefresh) refreshLiveData();
 
     // Drive the per-action spinner directly from status. If the user
     // refreshed the page mid-run we still show "Running…" on the first
