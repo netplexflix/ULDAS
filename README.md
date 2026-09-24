@@ -18,11 +18,7 @@ ULDAS supports MKV and MP4/m4v, and optionally remuxes unsupported video formats
 
 <img width="628" height="58" alt="Image" src="https://github.com/user-attachments/assets/8c1eca62-50cb-4114-9de2-1244dd0a0714" />
 
-Requires
-- [Python >=3.11](https://www.python.org/downloads/)
-- [FFmpeg](https://ffmpeg.org/download.html)
-- [MKVToolNix](https://mkvtoolnix.download/downloads.html)
-- [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract?tab=readme-ov-file#installing-tesseract) for image based subtitles (e.g. PGS)
+Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [langdetect](https://github.com/Mimino666/langdetect), [FFmpeg](https://ffmpeg.org/download.html), [MKVToolNix](https://mkvtoolnix.download/downloads.html) and [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract?tab=readme-ov-file#installing-tesseract).
 
 ---
 
