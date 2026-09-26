@@ -26,26 +26,15 @@ def _log_memory_usage(context: str = "") -> None:
                       context, mem.rss / 1024 / 1024, mem.vms / 1024 / 1024)
     except Exception:
         pass
-    try:
-        import torch
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024 / 1024
-            reserved = torch.cuda.memory_reserved() / 1024 / 1024
-            logger.debug("CUDA Memory [%s]: allocated=%.1fMB, reserved=%.1fMB",
-                          context, allocated, reserved)
-    except Exception:
-        pass
 
 
 def _cleanup_memory() -> None:
-    """Aggressively free memory after transcription."""
+    """Aggressively free memory after transcription.
+
+    CTranslate2 manages its own (CUDA) allocator, so only host memory is
+    trimmed here.
+    """
     gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
     try:
         import ctypes
         libc = ctypes.CDLL("libc.so.6")

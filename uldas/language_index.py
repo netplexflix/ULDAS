@@ -11,7 +11,8 @@ from typing import Callable, Optional
 
 from uldas.constants import (
     EXTERNAL_SUBTITLE_EXTENSIONS,
-    VIDEO_EXTENSIONS,
+    MP4_EXTENSIONS,
+    scan_video_extensions,
 )
 from uldas import external_subtitles as ext_sub_mod
 from uldas.tools import find_executable
@@ -24,9 +25,17 @@ INDEX_FILENAME = "language_index.json"
 
 # ── Probe helper ─────────────────────────────────────────────────────────
 def _probe_track_langs(ffprobe: str, file_path: Path,
-                       mkvmerge: Optional[str] = None
+                       mkvmerge: Optional[str] = None,
+                       mp4_inplace: bool = False,
                        ) -> "tuple[list[str], list[str]]":
-    """Return ``(audio_codes, subtitle_codes)`` for *file_path*."""
+    """Return ``(audio_codes, subtitle_codes)`` for *file_path*.
+
+    With ``mp4_inplace`` the MP4 family is probed with ffprobe only, so
+    the index sees the same track classification the in-place labeler
+    works from.
+    """
+    if mp4_inplace and file_path.suffix.lower() in MP4_EXTENSIONS:
+        mkvmerge = None
     if mkvmerge:
         try:
             r = subprocess.run(
@@ -246,19 +255,27 @@ class LanguageIndex:
                 self._dirty = True
         return {"files": len(file_keys), "ext_subs": len(ext_keys)}
 
-    def prune_ignored_tags(self, ignore_tags: list) -> dict:
+    def prune_ignored_tags(
+        self,
+        ignore_tags: list,
+        match_dirs: bool = False,
+        roots: Optional[list] = None,
+    ) -> dict:
         if self._read_only:
             return {"files": 0, "ext_subs": 0}
         tags_lower = [t.lower() for t in (ignore_tags or [])
                       if isinstance(t, str) and t]
         if not tags_lower:
             return {"files": 0, "ext_subs": 0}
+        root_prefixes = _normalize_path_prefixes(roots or []) if match_dirs else []
 
         def matches(key: str) -> bool:
             name = os.path.basename(key)
             dot = name.rfind(".")
             stem = (name[:dot] if dot > 0 else name).lower()
-            return any(tag in stem for tag in tags_lower)
+            if any(tag in stem for tag in tags_lower):
+                return True
+            return match_dirs and path_has_ignored_dir(key, tags_lower, root_prefixes)
 
         with self._lock:
             file_keys = [k for k in self._data["per_file"] if matches(k)]
@@ -324,6 +341,34 @@ def _key_outside(key: str, normalized_prefixes: list) -> bool:
     return not any(key_cmp.startswith(p) for p in normalized_prefixes)
 
 
+def path_has_ignored_dir(abs_path: str, tags_lower: list, root_prefixes: list) -> bool:
+    """True if any directory component of *abs_path* below one of the
+    normalized *root_prefixes* contains an ignore tag (case-insensitive).
+
+    Mirrors the ``os.walk`` pruning in the scanners: the scan root itself
+    is never matched, only the directories beneath it.  If *abs_path* is
+    not under any root, every directory component is checked.
+    """
+    if not tags_lower:
+        return False
+    parent = os.path.dirname(abs_path)
+    parent_cmp = parent if parent.endswith(os.sep) else parent + os.sep
+    rel = parent
+    best = ""
+    for p in root_prefixes or []:
+        if parent_cmp.startswith(p) and len(p) > len(best):
+            best = p
+    if best:
+        rel = parent[len(best):]
+    for comp in rel.replace("/", os.sep).split(os.sep):
+        if not comp:
+            continue
+        comp_lower = comp.lower()
+        if any(tag in comp_lower for tag in tags_lower):
+            return True
+    return False
+
+
 # ── Atomic JSON write ────────────────────────────────────────────────────
 def _atomic_write_json(path: str, data: dict) -> None:
     parent = os.path.dirname(path) or "."
@@ -372,8 +417,10 @@ def build_language_index(
     output_path: str,
     include_non_mkv_video: bool = False,
     ignore_tags: Optional[list] = None,
+    include_mp4: bool = False,
     cancel_check: Optional[Callable[[], bool]] = None,
     show_details: bool = False,
+    ignore_tags_match_dirs: bool = False,
 ) -> dict:
     """Walk *directories* and rebuild the index from scratch."""
     ffprobe = find_executable("ffprobe")
@@ -401,9 +448,7 @@ def build_language_index(
         if removed_files or removed_ext:
             idx._dirty = True
 
-    video_exts: set = {".mkv"}
-    if include_non_mkv_video:
-        video_exts.update(VIDEO_EXTENSIONS)
+    video_exts: set = scan_video_extensions(include_non_mkv_video, include_mp4)
     sub_exts: set = EXTERNAL_SUBTITLE_EXTENSIONS
 
     # Lowercase the ignore-tag list once so we can match against the
@@ -411,10 +456,12 @@ def build_language_index(
     ignore_lower: list = [
         t.lower() for t in (ignore_tags or []) if isinstance(t, str) and t
     ]
+    match_dirs = bool(ignore_tags_match_dirs and ignore_lower)
 
     videos_indexed = 0
     ext_subs_indexed = 0
     files_skipped = 0
+    dirs_skipped = 0
     dirs_scanned = 0
     started = time.monotonic()
     last_report = started
@@ -434,11 +481,18 @@ def build_language_index(
         else:
             print(f"Indexing languages under: {directory}", flush=True)
 
-        for dirpath, _dirnames, filenames in os.walk(directory, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
             if cancel_check and cancel_check():
                 cancelled = True
                 break
             dirs_scanned += 1
+            # Prune ignored directories in place so os.walk never
+            # descends into them (only when the toggle is enabled).
+            if match_dirs:
+                keep = [d for d in dirnames
+                        if not any(tag in d.lower() for tag in ignore_lower)]
+                dirs_skipped += len(dirnames) - len(keep)
+                dirnames[:] = keep
             for filename in filenames:
                 dot = filename.rfind(".")
                 if dot <= 0:
@@ -461,6 +515,7 @@ def build_language_index(
                 if ext in video_exts:
                     audio_codes, sub_codes = _probe_track_langs(
                         ffprobe, path, mkvmerge=mkvmerge,
+                        mp4_inplace=include_mp4,
                     )
                     videos_indexed += 1
                     idx.update_file(path, audio_codes, sub_codes)
@@ -486,15 +541,19 @@ def build_language_index(
                 idx.save_if_dirty()
 
     idx.note_indexed_now(directories)
-    ignored_pruned = idx.prune_ignored_tags(ignore_tags)
+    ignored_pruned = idx.prune_ignored_tags(
+        ignore_tags, match_dirs=ignore_tags_match_dirs, roots=directories,
+    )
     idx.save_if_dirty()
 
     snap = idx.snapshot()
     snap["duration_seconds"] = round(time.monotonic() - started, 1)
     snap["include_non_mkv_video"] = bool(include_non_mkv_video)
+    snap["include_mp4"] = bool(include_mp4)
     snap["video_files_indexed"] = videos_indexed
     snap["external_sub_files_indexed"] = ext_subs_indexed
     snap["files_skipped"] = files_skipped
+    snap["dirs_skipped"] = dirs_skipped
     snap["dirs_scanned"] = dirs_scanned
     snap["cancelled"] = cancelled
     snap["index_ignored_pruned"] = ignored_pruned

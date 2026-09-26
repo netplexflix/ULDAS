@@ -14,15 +14,11 @@ ULDAS (Undefined Language Detector for Audio and Subtitles) solves that problem 
 4. Detecting subtitle language (can also detect if subtitles are [FORCED] and/or [SDH])
 5. Updating the file metadata with the correct language codes and flags
 
-The script optionally remuxes non MKV video formats to MKV first.
+ULDAS supports MKV and MP4/m4v, and optionally remuxes unsupported video formats to MKV first.
 
 <img width="628" height="58" alt="Image" src="https://github.com/user-attachments/assets/8c1eca62-50cb-4114-9de2-1244dd0a0714" />
 
-Requires
-- [Python >=3.11](https://www.python.org/downloads/)
-- [FFmpeg](https://ffmpeg.org/download.html)
-- [MKVToolNix](https://mkvtoolnix.download/downloads.html)
-- [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract?tab=readme-ov-file#installing-tesseract) for image based subtitles (e.g. PGS)
+Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [langdetect](https://github.com/Mimino666/langdetect), [FFmpeg](https://ffmpeg.org/download.html), [MKVToolNix](https://mkvtoolnix.download/downloads.html) and [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract?tab=readme-ov-file#installing-tesseract).
 
 ---
 
@@ -36,6 +32,7 @@ Requires
     - [Step 5: Configure your settings](#step-5-configure-your-settings)
     - [Step 6: Run ULDAS](#step-6-run)
     - [Unraid](#unraid)
+    - [NVIDIA GPU](#nvidia-gpu)
 - [⚙️ Configuration](#configuration)
   - [Expert variables](#expert-variables)
   - [Model Size Guide](#model-size-guide)
@@ -109,8 +106,22 @@ services:
       - /path/to/folder2:/folder2
       # Optional: mount custom temp directory:
       # - /path/to/temp:/tmp/uldas
+    # Optional: NVIDIA GPU acceleration. Requires the NVIDIA Container Toolkit
+    # to be installed on the host first (Unraid: the "Nvidia-Driver" plugin):
+    # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+    # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     restart: unless-stopped
 ```
+
+> [!NOTE]
+> **GPU support:** ULDAS uses an NVIDIA GPU automatically when one is made available to the container; otherwise it runs on CPU. See [NVIDIA GPU](#nvidia-gpu) below.
 
 <a id="step-3-update"></a>
 #### Step 3: Update volumes, IDs, port and CRON Schedule
@@ -175,6 +186,33 @@ services:
 
 ULDAS is available in Community Applications. Search for "ULDAS" or install manually using the template in [unraid/](./unraid/).
 
+---
+
+<a id="nvidia-gpu"></a>
+### NVIDIA GPU
+
+ULDAS runs Whisper through CTranslate2, which supports **CPU and NVIDIA CUDA only**. Intel and AMD GPUs are not supported. With the default `device: auto`, ULDAS uses an NVIDIA GPU when one is available inside the container and otherwise runs on CPU; slower, but fully functional.
+
+**Making the GPU available is a host-side setting.** The NVIDIA container runtime injects the GPU driver into the container. Enable it as follows:
+
+| Platform | What to do |
+| --- | --- |
+| Docker Compose (Linux) | Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), then uncomment the `deploy:` block in the compose example above |
+| Docker Desktop (Windows) | Use the **WSL 2** backend (Settings → General); the toolkit is bundled. Then uncomment the `deploy:` block |
+| `docker run` | Add `--gpus all` |
+| Unraid | Install the **Nvidia-Driver** plugin, then add `--runtime=nvidia` to the container's **Extra Parameters** |
+
+Hosts whose Docker daemon has `"default-runtime": "nvidia"` configured need nothing extra.
+
+**Environment variables.** These two are read by the NVIDIA runtime. Both are already set in the image, so you normally don't need to touch them:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NVIDIA_VISIBLE_DEVICES` | `all` | Which GPU(s) to expose: `all`, an index (`0`), or a UUID from `nvidia-smi -L`. Useful on multi-GPU hosts |
+| `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility` | Driver features to inject. `compute` is required for Whisper; `utility` provides `nvidia-smi` inside the container. Leave as is |
+
+**Verifying.** With `show_details: true`, the start of a run logs `Initializing faster-whisper: device=cuda, compute=float16, …`. `docker exec uldas nvidia-smi` should list your GPU. If you see `device=cpu` on an NVIDIA host, the runtime is not active; recheck the table above.
+
 ***
 
 <a id="configuration"></a>
@@ -183,7 +221,9 @@ Rename `config.example.yml` to `config.yml` and change the values where needed:
 
 - **path**: Main Paths for your media.
 - **ignore_tags**: List of substrings. Any file whose name contains one of these (case-insensitive, matched against the name without extension) is skipped. Useful for trailers, samples, featurettes. Example: `[-trailer, sample]`
-- **remux_to_mkv**: `true` remuxes non-MKV files so they can be processed too
+- **ignore_tags_match_dirs**: `true` also skips any directory (and everything inside it) whose name contains one of the `ignore_tags`. The scan directories themselves are never matched. Default `false`.
+- **remux_to_mkv**: `true` remuxes non-MKV files so they can be processed too (MP4/M4V files are excluded from remuxing when `mp4_support` is on)
+- **mp4_support**: `true` labels `.mp4`/`.m4v` files in place, without remuxing them to MKV. Default `false`. See [Supported File Formats](#supported-file-formats) for the MP4 limitations.
 - **show_details**: `true` will show you more details of what's happening
 - **dry_run**: `true` will do a dry run (will show what it would do, without actually altering any files)
 - **run_on_startup**: `false` (default) — ULDAS will not run immediately when the container starts, giving you time to review settings in the webUI first. Set to `true` to run straight away on container start; subsequent runs then follow the configured schedule in either case.
@@ -275,8 +315,17 @@ The webhook only fires on an actual remux (the rename event), never on in-place 
 Always Processed:
 - **MKV files:** Primary target format
 
+With `mp4_support: true`
+- **MP4, M4V:** Processed in place. Language tags are written directly into the file's track headers (the MP4 equivalent of what `mkvpropedit` does for MKV).
+- **MP4 limitations** The MP4 container only has a per-track *language* field, so compared to MKV:
+  - Subtitle tracks get a language tag only. No track name (`English [Forced] [SDH]`) and no forced flag are written, because MP4 has no standard place for them.
+  - Forced-subtitle and SDH analysis (`analyze_forced_subtitles`, `detect_sdh_subtitles`) are skipped for MP4 files, since their result cannot be stored.
+  - Some MP4s written by older/Apple tools store a legacy Macintosh language code instead of an ISO code. ffprobe reports the most common one (`0`) as `eng`, so ULDAS treats such tracks as already labeled unless `reprocess_all` is used.
+  - Files with a compressed movie header (`cmov`) are not supported and are reported as failed.
+- When `mp4_support` is on, `remux_to_mkv` no longer remuxes MP4/M4V files; the other formats below still are.
+
 With `remux_to_mkv: true`
-- MP4, AVI, MOV, WMV, FLV, WebM, M4V, M2TS, MTS, TS, VOB
+- MP4, AVI, MOV, WMV, FLV, WebM, M4V, M2TS, MTS, TS, VOB (MP4 and M4V only when `mp4_support` is off)
 - Note: Original files are deleted after successful conversion
 
 External subtitle File Formats:
@@ -317,6 +366,8 @@ External subtitle File Formats:
 | `--directory DIR [DIR ...]` | Override directory/directories to scan. Accepts multiple paths |
 | `--remux-to-mkv` | Remux non-MKV video files to MKV before processing |
 | `--no-remux-to-mkv` | Disable remuxing non-MKV files to MKV |
+| `--mp4-support` | Label MP4/M4V files in place instead of remuxing or skipping them |
+| `--no-mp4-support` | Disable in-place MP4/M4V labeling |
 | `--model {tiny,base,small,medium,large}` | Whisper model size to use for audio language detection |
 | `--dry-run` | Simulate all changes without modifying any files |
 | `--temp-dir DIR` | Override the temporary directory used for intermediate files |
@@ -401,6 +452,7 @@ Every CLI option corresponds to a key in the YAML configuration file. CLI argume
 | --- | --- | --- |
 | `--directory` | `path` | `["."]` |
 | `--remux-to-mkv` | `remux_to_mkv` | `false` |
+| `--mp4-support` | `mp4_support` | `false` |
 | `--show-details` | `show_details` | `true` |
 | `--model` | `whisper_model` | `base` |
 | `--dry-run` | `dry_run` | `false` |

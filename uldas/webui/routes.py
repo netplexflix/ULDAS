@@ -43,6 +43,15 @@ def _file_mtimes(config_dir: str) -> tuple:
     return tuple(out)
 
 
+def _data_version(config_dir: str) -> str:
+    """Cheap fingerprint of the tracking files for the dashboard poll.
+
+    Changes whenever the tracker cache would reload, so the web UI can
+    re-fetch stats / log only when there is actually new data.
+    """
+    return "-".join(f"{m:.6f}" for m in _file_mtimes(config_dir))
+
+
 def _get_cached_tracker(config_dir: str) -> ProcessingTracker:
     """Return a cached read-only ProcessingTracker for *config_dir*.
 
@@ -132,11 +141,27 @@ CONFIG_OPTIONS = [
         "advanced": False,
     },
     {
+        "key": "ignore_tags_match_dirs",
+        "type": "bool",
+        "default": False,
+        "label": "Apply Ignore Tags to Directories",
+        "description": "Also skip any directory whose name contains one of the Ignore Tags (case-insensitive). Everything inside a matching directory is ignored.",
+        "advanced": False,
+    },
+    {
         "key": "remux_to_mkv",
         "type": "bool",
         "default": False,
         "label": "Remux to MKV",
-        "description": "Remux non-MKV video files (MP4, AVI, etc.) to MKV format before processing. The original file is replaced.",
+        "description": "Remux non-MKV video files like AVI, MOV, TS, etc. (and MP4/M4V unless 'MP4 Support' is enabled) to MKV format before processing. The original file is replaced.",
+        "advanced": False,
+    },
+    {
+        "key": "mp4_support",
+        "type": "bool",
+        "default": False,
+        "label": "MP4 Support",
+        "description": "Label audio and embedded subtitle languages directly inside .mp4/.m4v files, without remuxing. Only the language tag can be written: subtitle track names and forced flags are not supported by MP4. When enabled, 'Remux to MKV' no longer remuxes .mp4/.m4v files.",
         "advanced": False,
     },
     {
@@ -470,12 +495,15 @@ def register_routes(app, scheduler_state=None):
     @app.route("/api/status")
     def get_status():
         if scheduler_state is None:
-            return jsonify({"status": "unknown", "has_cron": False,
-                            "error_message": "", "next_run_time": None,
-                            "next_run_seconds": None, "last_run_time": None,
-                            "started_at": None, "cron_expression": None,
-                            "last_run_summary": None})
-        return jsonify(scheduler_state.get_status_dict())
+            status = {"status": "unknown", "has_cron": False,
+                      "error_message": "", "next_run_time": None,
+                      "next_run_seconds": None, "last_run_time": None,
+                      "started_at": None, "cron_expression": None,
+                      "last_run_summary": None}
+        else:
+            status = dict(scheduler_state.get_status_dict())
+        status["data_version"] = _data_version(webui._config_dir)
+        return jsonify(status)
 
     @app.route("/api/scheduler/run-now", methods=["POST"])
     def scheduler_run_now():

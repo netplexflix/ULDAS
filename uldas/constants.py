@@ -1,6 +1,6 @@
 #file: uldas/constants.py
 
-VERSION = "2026.06.26"
+VERSION = "2026.09.26"
 
 # ── Language name → ISO 639-2 (bibliographic) ────────────────────────────
 LANGUAGE_CODES: dict[str, str] = {
@@ -155,6 +155,11 @@ ISO639_2_TO_1: dict[str, str] = {
     "som": "so", "afr": "af", "zul": "zu", "xho": "xh", "may": "ms",
     "ind": "id", "tgl": "tl", "jav": "jv", "sun": "su", "epo": "eo",
     "lat": "la",
+    # Remaining Whisper languages for MP4 ``mdhd`` support.
+    "mao": "mi", "bre": "br", "sna": "sn", "oci": "oc", "bel": "be",
+    "snd": "sd", "yid": "yi", "fao": "fo", "hat": "ht", "pus": "ps",
+    "nno": "nn", "san": "sa", "ltz": "lb", "mlg": "mg", "asm": "as",
+    "tat": "tt", "lin": "ln", "bak": "ba",
 }
 
 # Alternative 3-letter codes (ISO 639-2/T vs 639-2/B)
@@ -165,6 +170,8 @@ ISO639_ALTERNATIVE_CODES: dict[str, str] = {
 
 # ── ISO 639-1 → ISO 639-2 (reverse) ─────────────────────────────────────
 ISO639_1_TO_2: dict[str, str] = {v: k for k, v in ISO639_2_TO_1.items()}
+# Whisper reports Javanese as the legacy "jw" code; map it one-way only.
+ISO639_1_TO_2["jw"] = "jav"
 
 # ── Human-readable language names ────────────────────────────────────────
 LANGUAGE_NAMES: dict[str, str] = {
@@ -365,6 +372,24 @@ VIDEO_EXTENSIONS: set[str] = {
     ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm",
     ".m4v", ".m2ts", ".mts", ".ts", ".vob",
 }
+
+# ISO-BMFF containers that can be language-tagged in place (see uldas/mp4.py)
+MP4_EXTENSIONS: set[str] = {".mp4", ".m4v"}
+
+
+def scan_video_extensions(remux_to_mkv: bool, mp4_support: bool) -> set[str]:
+    """Return the set of video extensions a scan should pick up.
+
+    MKV is always processed.  ``remux_to_mkv`` pulls in every other
+    container (they get remuxed first), and ``mp4_support`` pulls in the
+    MP4 family so it can be labeled in place without remuxing.
+    """
+    exts: set[str] = {".mkv"}
+    if remux_to_mkv:
+        exts.update(VIDEO_EXTENSIONS)
+    if mp4_support:
+        exts.update(MP4_EXTENSIONS)
+    return exts
 
 # ── External subtitle file extensions ────────────────────────────────────
 EXTERNAL_SUBTITLE_EXTENSIONS: set[str] = {
