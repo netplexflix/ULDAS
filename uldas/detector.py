@@ -34,6 +34,23 @@ from uldas import mp4 as mp4_mod
 logger = logging.getLogger(__name__)
 
 
+def _audio_track_details(results: Dict) -> list:
+    """Tracker ``track_details`` for one processed file: labeled tracks
+    plus inconclusive ones (kept as 'und' / their previous tag)."""
+    details = list(results["processed_tracks"])
+    details += [
+        {
+            "track_index": t["track_index"],
+            "detected_language": "und",
+            "previous_language": t["previous_language"],
+            "inconclusive": True,
+        }
+        for t in results.get("inconclusive_tracks", [])
+    ]
+    details.sort(key=lambda t: t["track_index"])
+    return details
+
+
 def _flush_all_logs() -> None:
     """Flush all log handlers to ensure output is written before critical operations."""
     for handler in logging.getLogger().handlers:
@@ -1045,6 +1062,7 @@ class MKVLanguageDetector:
             "undefined_tracks": 0,
             "processed_tracks": [],
             "failed_tracks": [],
+            "inconclusive_tracks": [],
             "errors": [],
             "subtitle_results": None,
             "external_subtitle_results": None,
@@ -1179,6 +1197,14 @@ class MKVLanguageDetector:
                             results["failed_tracks"].append(tidx)
                             failures = True
                             continue
+                        if code == audio_mod.INCONCLUSIVE:
+                            # Speech but no confident language: keep the
+                            # current tag rather than guess.
+                            results["inconclusive_tracks"].append({
+                                "track_index": tidx,
+                                "previous_language": cur_lang,
+                            })
+                            continue
                         if self.update_mkv_language(mkv_path, tidx, code, self.config.dry_run):
                             results["processed_tracks"].append({
                                 "track_index": tidx,
@@ -1216,7 +1242,8 @@ class MKVLanguageDetector:
                 and not self.config.dry_run):
             if self.config.reprocess_language:
                 touched = bool(results["processed_tracks"]
-                               or results["failed_tracks"])
+                               or results["failed_tracks"]
+                               or results["inconclusive_tracks"])
                 if touched:
                     self._update_tracker_relabel(mkv_path, abs_key,
                                                  audio_ok, results)
@@ -1244,6 +1271,8 @@ class MKVLanguageDetector:
                         flags.append("audio_labeled")
                     if any(t["detected_language"] == "zxx" for t in results["processed_tracks"]):
                         flags.append("silent_content")
+                if results["inconclusive_tracks"]:
+                    flags.append("inconclusive")
                 subtitle_count = 0
                 sub_res = results.get("subtitle_results")
                 if sub_res and sub_res.get("processed_subtitle_tracks"):
@@ -1251,7 +1280,7 @@ class MKVLanguageDetector:
                     flags.append("subtitle_labeled")
                 if not flags:
                     flags.append("no_action_required")
-                track_details = results["processed_tracks"] or None
+                track_details = _audio_track_details(results) or None
                 subtitle_details = None
                 if sub_res and sub_res.get("processed_subtitle_tracks"):
                     subtitle_details = sub_res["processed_subtitle_tracks"]
@@ -1297,53 +1326,9 @@ class MKVLanguageDetector:
     def _update_tracker_relabel(self, mkv_path: Path, abs_key: str,
                                 audio_ok: bool, results: Dict) -> None:
         """Merge a by-language re-detection result into the existing entry."""
-        existing = self.tracker.get_entry(mkv_path, key=abs_key) or {}
-
-        old_details = list(existing.get("track_details") or [])
-        new_details = results["processed_tracks"] or []
-        new_idxs = {t["track_index"] for t in new_details}
-        merged_details = [t for t in old_details
-                          if t.get("track_index") not in new_idxs]
-        merged_details.extend(new_details)
-        merged_details.sort(key=lambda t: t.get("track_index", 0))
-
-        prior_flags = list(existing.get("flags") or [])
-        # Strip silent_content / no_action_required; we recompute those.
-        flags = [f for f in prior_flags
-                 if f not in ("silent_content", "no_action_required")]
-        if any(t.get("detected_language") == "zxx" for t in merged_details):
-            if "silent_content" not in flags:
-                flags.append("silent_content")
-        if not flags:
-            flags.append("no_action_required")
-
-        # Preserve prior counts: relabels do not add to the lifetime total.
-        audio_count = int(existing.get("audio_tracks_labeled", 0))
-        if audio_count == 0 and "audio_labeled" not in prior_flags and new_details:
-            audio_count = sum(
-                1 for t in new_details if t.get("detected_language") != "zxx"
-            )
-            if audio_count and "audio_labeled" not in flags:
-                flags.append("audio_labeled")
-        subtitle_count = int(existing.get("subtitle_tracks_labeled", 0))
-
-        original_format = existing.get("original_format")
-        subtitle_details = existing.get("subtitle_details")
-        prior_audio = bool(existing.get("audio_processed", False))
-        prior_sub = bool(existing.get("subtitle_processed", False))
-        audio_success = prior_audio or audio_ok
-
-        self.tracker.mark_processed(
-            mkv_path,
-            audio_success,
-            prior_sub,
-            key=abs_key,
-            flags=flags,
-            audio_tracks_labeled=audio_count,
-            subtitle_tracks_labeled=subtitle_count,
-            track_details=merged_details or None,
-            subtitle_details=subtitle_details,
-            original_format=original_format,
+        self.tracker.merge_audio_relabel(
+            mkv_path, _audio_track_details(results),
+            audio_ok=audio_ok, key=abs_key,
         )
 
     # ── Process explicit file list (no directory walk) ───────────────────
@@ -1357,48 +1342,8 @@ class MKVLanguageDetector:
         if self._should_cancel() or not file_paths:
             return results
 
-        ignore_tags = [t.lower() for t in (self.config.ignore_tags or [])
-                       if isinstance(t, str) and t]
-        match_dirs = bool(self.config.ignore_tags_match_dirs and ignore_tags)
-        root_prefixes: List[str] = []
-        if match_dirs:
-            from uldas.language_index import (
-                _normalize_path_prefixes, path_has_ignored_dir,
-            )
-            root_prefixes = _normalize_path_prefixes(list(self.config.path or []))
-
-        # The index may hold entries for containers the current settings
-        # no longer cover (e.g. MP4s indexed while MP4 support was on);
-        # those can't be labeled with the tools this run would use.
-        video_exts = scan_video_extensions(
-            self.config.remux_to_mkv, self.config.mp4_support,
-        )
-
-        actionable: List[Path] = []
-        missing = 0
-        ignored = 0
-        for fp in file_paths:
-            try:
-                if not fp.exists():
-                    missing += 1
-                    continue
-            except OSError:
-                missing += 1
-                continue
-            if fp.suffix.lower() not in video_exts:
-                ignored += 1
-                continue
-            if ignore_tags:
-                stem = fp.stem.lower()
-                if any(tag in stem for tag in ignore_tags):
-                    ignored += 1
-                    continue
-                if match_dirs and path_has_ignored_dir(
-                    os.path.abspath(str(fp)), ignore_tags, root_prefixes,
-                ):
-                    ignored += 1
-                    continue
-            actionable.append(fp)
+        from uldas.language_index import filter_index_paths
+        actionable, missing, ignored = filter_index_paths(file_paths, self.config)
 
         if missing or ignored:
             logger.info(

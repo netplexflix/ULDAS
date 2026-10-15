@@ -21,6 +21,7 @@
     - Forced subtitle detection
     - SDH (Subtitles for Deaf/Hard of Hearing) detection
     - MKV remuxing support
+    - In-place MP4/M4V language labeling (no remux)
     - Tracking to avoid reprocessing files
 
     Please see the GitHub page for detailed setup instructions and usage guidelines.
@@ -41,6 +42,6 @@
   <Config Name="4K TV Shows" Target="/folder4" Default="" Mode="rw" Description="e.g. Path to your 4K TV Shows library (optional see docs)" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/plex/TV_4K</Config>
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
-  <Config Name="Nvidia Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Nvidia GPU devices to expose (requires --runtime=nvidia in extra parameters)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
-  <Config Name="Nvidia Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="Nvidia driver capabilities (requires --runtime=nvidia in extra parameters)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="Nvidia Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Which GPU(s) to expose: all, an index (0) or a UUID. Only has an effect when --runtime=nvidia is set in Extra Parameters (needs the Nvidia-Driver plugin)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="Nvidia Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="Driver features to expose; leave at default. Only has an effect when --runtime=nvidia is set in Extra Parameters" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
 </Container>

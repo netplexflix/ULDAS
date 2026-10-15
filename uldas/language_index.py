@@ -369,6 +369,49 @@ def path_has_ignored_dir(abs_path: str, tags_lower: list, root_prefixes: list) -
     return False
 
 
+def filter_index_paths(paths: list, config) -> "tuple[list[Path], int, int]":
+    """Split index-sourced *paths* into the files the current settings can act on.
+
+    Returns ``(actionable, missing, ignored)``.  *ignored* counts files
+    skipped by ``ignore_tags`` or because their container isn't covered
+    by the current settings (e.g. MP4s indexed while MP4 support was on).
+    """
+    tags_lower = [t.lower() for t in (config.ignore_tags or [])
+                  if isinstance(t, str) and t]
+    match_dirs = bool(config.ignore_tags_match_dirs and tags_lower)
+    root_prefixes = (_normalize_path_prefixes(list(config.path or []))
+                     if match_dirs else [])
+    video_exts = scan_video_extensions(config.remux_to_mkv, config.mp4_support)
+
+    actionable: list = []
+    missing = 0
+    ignored = 0
+    for fp in paths:
+        fp = Path(fp)
+        try:
+            if not fp.exists():
+                missing += 1
+                continue
+        except OSError:
+            missing += 1
+            continue
+        if fp.suffix.lower() not in video_exts:
+            ignored += 1
+            continue
+        if tags_lower:
+            stem = fp.stem.lower()
+            if any(tag in stem for tag in tags_lower):
+                ignored += 1
+                continue
+            if match_dirs and path_has_ignored_dir(
+                os.path.abspath(str(fp)), tags_lower, root_prefixes,
+            ):
+                ignored += 1
+                continue
+        actionable.append(fp)
+    return actionable, missing, ignored
+
+
 # ── Atomic JSON write ────────────────────────────────────────────────────
 def _atomic_write_json(path: str, data: dict) -> None:
     parent = os.path.dirname(path) or "."

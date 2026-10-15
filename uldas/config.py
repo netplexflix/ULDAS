@@ -12,6 +12,8 @@ class Config:
     TRANSIENT_RUN_OPTIONS: dict = {
         "index_languages_only": False,
         "reprocess_language": "",
+        "relabel_language_from": "",
+        "relabel_language_to": "",
         "force_reprocess": False,
         "reprocess_all": False,
         "reprocess_all_subtitles": False,
@@ -55,6 +57,8 @@ class Config:
         self.use_tracking: bool = True
         self.force_reprocess: bool = False
         self.reprocess_language: str = ""
+        self.relabel_language_from: str = ""
+        self.relabel_language_to: str = ""
         self.index_languages_only: bool = False
 
         # ── Subtitle processing ──────────────────────────────────────────

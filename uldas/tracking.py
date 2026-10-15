@@ -350,6 +350,69 @@ class ProcessingTracker:
         self.data[key] = entry
         self._dirty = True
 
+    def merge_audio_relabel(
+        self,
+        file_path: Path,
+        new_details: list,
+        audio_ok: bool = True,
+        key: str = None,
+        add_flags: tuple = (),
+    ) -> None:
+        """Merge re-detected or relabeled audio tracks into an existing entry.
+
+        Used by reprocess-by-language and the change-language-tag action.
+        Track details are replaced per track index, the derived flags
+        (silent_content / inconclusive / no_action_required) are
+        recomputed, and lifetime label counts are preserved.  The file is
+        re-stat'ed, so an in-place tag edit doesn't look like a changed
+        file on the next run.
+        """
+        existing = self.get_entry(file_path, key=key) or {}
+
+        old_details = list(existing.get("track_details") or [])
+        new_details = list(new_details or [])
+        new_idxs = {t["track_index"] for t in new_details}
+        merged_details = [t for t in old_details
+                          if t.get("track_index") not in new_idxs]
+        merged_details.extend(new_details)
+        merged_details.sort(key=lambda t: t.get("track_index", 0))
+
+        prior_flags = list(existing.get("flags") or [])
+        derived = ("silent_content", "inconclusive", "no_action_required")
+        flags = [f for f in prior_flags if f not in derived]
+        for flag in add_flags:
+            if flag not in flags:
+                flags.append(flag)
+        if any(t.get("detected_language") == "zxx" for t in merged_details):
+            flags.append("silent_content")
+        if any(t.get("inconclusive") for t in merged_details):
+            flags.append("inconclusive")
+
+        # Preserve prior counts: relabels do not add to the lifetime total.
+        audio_count = int(existing.get("audio_tracks_labeled", 0))
+        if audio_count == 0 and "audio_labeled" not in prior_flags and new_details:
+            audio_count = sum(
+                1 for t in new_details
+                if t.get("detected_language") not in ("zxx", "und")
+            )
+            if audio_count and "audio_labeled" not in flags:
+                flags.append("audio_labeled")
+        if not flags:
+            flags.append("no_action_required")
+
+        self.mark_processed(
+            file_path,
+            bool(existing.get("audio_processed", False)) or audio_ok,
+            bool(existing.get("subtitle_processed", False)),
+            key=key,
+            flags=flags,
+            audio_tracks_labeled=audio_count,
+            subtitle_tracks_labeled=int(existing.get("subtitle_tracks_labeled", 0)),
+            track_details=merged_details or None,
+            subtitle_details=existing.get("subtitle_details"),
+            original_format=existing.get("original_format"),
+        )
+
     # ── External subtitle tracking ───────────────────────────────────────
     def is_external_subtitle_tracked(self, subtitle_path: Path) -> bool:
         """Check if an external subtitle file is already tracked (any flag)."""

@@ -1,4 +1,5 @@
 faster-whisper>=1.2.0
+av>=11,<19
 PyYAML>=6.0.2
 requests>=2.32.4
 packaging>=21.3
@@ -9,7 +10,7 @@ pillow>=11.3.0
 flask>=3.0.0
 croniter>=2.0.0
 
-# Note: External tools required (install separately):
+# Note: External tools required (install separately if not running in Docker):
 # - FFmpeg: https://ffmpeg.org/download.html
 # - MKVToolNix: https://mkvtoolnix.download/downloads.html
 # - Tesseract-OCR: https://tesseract-ocr.github.io/tessdoc/Installation.html

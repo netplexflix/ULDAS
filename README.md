@@ -243,7 +243,7 @@ Only Change these if you know what you're doing.
 - **device**: Hardware acceleration preference (auto, cpu, or cuda). Auto-detects CUDA GPU if available, falls back to CPU (Default: "auto")
 - **compute_type**: Precision/performance trade-off (auto, int8, float16, float32). Auto-selects optimal type based on device (Default: "auto")
 - **cpu_threads**:Number of CPU threads to use. 0 = automatic detection based on system cores (Default: 0)
-- **confidence_threshold**: Minimum confidence level (0.0-1.0) required to accept language detection from audio samples. If sample-based detection falls below this threshold, the entire audio track is analyzed for improved accuracy. Higher values are more conservative but reduce false positives. (Default: 0.9)
+- **confidence_threshold**: Minimum Whisper language probability (0.0-1.0) for a single audio sample to be accepted immediately. Below it, the evidence of several samples spread over the runtime is pooled, and if that is still not convincing the entire audio track is analyzed. Tracks with no confident result are left as `und` and flagged *Inconclusive*. Higher values are more conservative but reduce false positives. (Default: 0.9)
 - **subtitle_confidence_threshold**: If subtitle detection confidence falls below confidence, the track is skipped
 - **reprocess_all** : `true` will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
 - **reprocess_all_subtitles**: `true` will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
@@ -279,6 +279,12 @@ Absolute count thresholds:
 You can access the webui via localhost:2119
 Here you can edit settings and check your log.
 [Screenshots](#webuiss)
+
+**Maintenance Actions** (Settings → Advanced):
+- **Reprocess audio tracks tagged as a specific language**: re-runs detection on every track with that tag (e.g. `zxx` or a suspicious `nl`).
+- **Change audio language tag**: rewrites every audio track tagged X to Y across your libraries, *without* running detection. Use it when you know the right answer, e.g. `zxx` → `en` in an all-English library. Files are modified in place; Dry Run is honored.
+- **Index languages**: read-only pass that records every track's language tag; feeds the dropdowns above and the Dashboard chart.
+- **Prune missing files**: drops tracker entries for libraries you removed.
 
 ***
 
@@ -398,6 +404,9 @@ External subtitle File Formats:
 | --- | --- |
 | `--confidence-threshold F` | Confidence threshold for audio language detection (`0.0`��`1.0`) |
 | `--reprocess-all` | Reprocess all audio tracks, even those already tagged |
+| `--reprocess-language CODE` | One-shot run that re-detects audio tracks currently tagged `CODE` (e.g. `zxx`) |
+| `--relabel-language FROM:TO` | One-shot run that changes every audio track tagged `FROM` to `TO` (e.g. `zxx:en`) without running detection |
+| `--index-languages` | One-shot, read-only run that records the language tag of every track in the language index |
 | `--force-reprocess` | Force reprocessing, ignoring the tracking cache entirely |
 
 <a id="tracking"></a>
@@ -506,7 +515,7 @@ Every CLI option corresponds to a key in the YAML configuration file. CLI argume
 > [!NOTE]
 > ### Audio Tracks
 > A warning will be given at the end of a run for any files that were marked as 'zxx' (no linguistic content).<br>
-> While it is perfectly possible for a video file to have no linguistic content (silent movies, old Disney cartoons, etc), these could also indicate AI 'hallucinations'.
+> 'zxx' is only written when voice activity detection finds practically no speech in the whole track, or when the only "speech" it finds is music or singing (silent movies, old Disney cartoons, etc). Whisper reports such music as Latin, so ULDAS never tags audio as Latin. Tracks that contain speech but no confident language are left as 'und' and flagged *Inconclusive* in the log, rather than guessed.
 > You may want to manually check these files.
 >
 > ### Subtitle Tracks

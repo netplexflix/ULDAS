@@ -277,7 +277,7 @@ CONFIG_OPTIONS = [
         "type": "float",
         "default": 0.9,
         "label": "Audio Confidence Threshold",
-        "description": "Minimum confidence level (0.0-1.0) required to accept audio language detection. If sample-based detection falls below this, the entire track is analyzed.",
+        "description": "Minimum Whisper language probability (0.0-1.0) for a single audio sample to be accepted immediately. Below it, evidence from several samples is pooled and, if still unsure, the entire track is analyzed. Tracks with no confident result are left as 'und' and flagged Inconclusive.",
         "advanced": True,
     },
     {
@@ -548,6 +548,42 @@ def register_routes(app, scheduler_state=None):
         return jsonify({"status": "ok",
                         "message": f"Reprocess run triggered for language '{code}'"})
 
+    @app.route("/api/scheduler/relabel-language", methods=["POST"])
+    def scheduler_relabel_language():
+        from uldas.constants import LANGUAGE_NAMES
+        from uldas.utils import normalize_language_code
+
+        if scheduler_state is None:
+            return jsonify({"status": "error",
+                            "message": "No scheduler active (not in CRON mode)"}), 404
+        if scheduler_state.status == "running":
+            return jsonify({"status": "error",
+                            "message": "A processing run is already in progress"}), 409
+        body = request.get_json(silent=True) or {}
+        codes = {}
+        for field in ("from", "to"):
+            code = (body.get(field) or "").strip().lower()
+            if not code:
+                return jsonify({"status": "error",
+                                "message": f"Missing '{field}' in request body"}), 400
+            if not code.replace("-", "").isalnum() or len(code) > 10:
+                return jsonify({"status": "error",
+                                "message": f"Invalid language code: {code}"}), 400
+            codes[field] = normalize_language_code(code)
+        src, dst = codes["from"], codes["to"]
+        if src == dst:
+            return jsonify({"status": "error",
+                            "message": "Source and target language are the same"}), 400
+        if dst == "und" or dst not in LANGUAGE_NAMES:
+            return jsonify({"status": "error",
+                            "message": f"Unsupported target language: {dst}"}), 400
+        scheduler_state.request_run(options={
+            "relabel_language_from": src,
+            "relabel_language_to": dst,
+        })
+        return jsonify({"status": "ok",
+                        "message": f"Changing audio language tag {src} → {dst}"})
+
     @app.route("/api/scheduler/stop", methods=["POST"])
     def scheduler_stop():
         if scheduler_state is None:
@@ -721,8 +757,10 @@ def register_routes(app, scheduler_state=None):
         index = load_language_index(webui._config_dir)
         if index and isinstance(index.get("counts"), dict):
             audio = index["counts"].get("audio") or {}
-            items = [{"code": code, "name": _name_for(code)}
-                     for code in audio.keys()]
+            items = [{"code": code, "name": _name_for(code),
+                      "tracks": (counts or {}).get("tracks", 0),
+                      "files": (counts or {}).get("files", 0)}
+                     for code, counts in audio.items()]
             items.sort(key=lambda x: (x["name"].lower(), x["code"]))
             return jsonify({
                 "source": "index",
@@ -732,13 +770,25 @@ def register_routes(app, scheduler_state=None):
 
         tracker = _get_cached_tracker(webui._config_dir)
         raw = tracker.count_tracked_audio_languages()
-        items = [{"code": r["code"], "name": _name_for(r["code"])} for r in raw]
+        items = [{"code": r["code"], "name": _name_for(r["code"]),
+                  "tracks": r["tracks"], "files": r["files"]} for r in raw]
         items.sort(key=lambda x: (x["name"].lower(), x["code"]))
         return jsonify({
             "source": "tracker",
             "indexed_at": None,
             "languages": items,
         })
+
+    @app.route("/api/languages/targets")
+    def get_language_targets():
+        """Languages the change-language-tag action can write: everything
+        detection can produce, plus 'zxx'."""
+        from uldas.constants import ISO639_1_TO_2
+        codes = {c for c in ISO639_1_TO_2 if len(c) == 2 and c != "jw"}
+        codes.add("zxx")
+        items = [{"code": c, "name": _name_for(c)} for c in codes]
+        items.sort(key=lambda x: (x["name"].lower(), x["code"]))
+        return jsonify({"languages": items})
 
     @app.route("/api/stats/language-index")
     def get_language_index():

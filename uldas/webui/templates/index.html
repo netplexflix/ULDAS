@@ -452,6 +452,9 @@ input.input-needs-value::placeholder { color: var(--warning); }
 .maintenance-action-controls select {
     min-width: 220px;
 }
+.maintenance-action-arrow {
+    color: var(--text-secondary);
+}
 .maintenance-action-source {
     margin-top: 8px;
     color: var(--text-secondary);
@@ -526,6 +529,8 @@ input.input-needs-value::placeholder { color: var(--warning); }
 .filter-btn[data-flag="external_subtitle"].active { background: var(--purple); border-color: var(--purple); }
 .filter-btn[data-flag="failed"].active { background: var(--danger); border-color: var(--danger); }
 .filter-btn[data-flag="silent_content"].active { background: var(--warning); border-color: var(--warning); color: #000; }
+.filter-btn[data-flag="inconclusive"].active { background: var(--warning); border-color: var(--warning); color: #000; }
+.filter-btn[data-flag="relabeled"].active { background: var(--purple); border-color: var(--purple); }
 
 .filter-btn .checkmark { margin-right: 4px; display: none; }
 .filter-btn.active .checkmark { display: inline; }
@@ -1436,10 +1441,28 @@ input[type="date"] { color-scheme: dark; }
                 <div class="maintenance-action-source" id="reprocess-language-source"></div>
             </div>
 
+            <div class="maintenance-action" data-action="relabel-language">
+                <div class="maintenance-action-label">Change audio language tag</div>
+                <div class="maintenance-action-desc">
+                    <p>Rewrites the tag of every audio track currently tagged with the first language to the second one, across all configured libraries. Whisper is <strong>not</strong> run, so only use this when you know the right language, e.g. <code>zxx</code> &rarr; <code>en</code> in a library that is all English. Files are modified in place; Dry Run is honored.</p>
+                </div>
+                <div class="maintenance-action-controls">
+                    <select id="relabel-from-select" onchange="updateRelabelButton()">
+                        <option value="">Loading languages…</option>
+                    </select>
+                    <span class="maintenance-action-arrow">&rarr;</span>
+                    <select id="relabel-to-select" onchange="updateRelabelButton()">
+                        <option value="">Loading languages…</option>
+                    </select>
+                    <button class="btn btn-secondary" id="btn-relabel-language" onclick="relabelLanguage()" disabled>Change tag now</button>
+                    <span class="maintenance-action-running" id="running-relabel-language" style="display:none"><span class="spinner"></span>Running…</span>
+                </div>
+            </div>
+
             <div class="maintenance-action" data-action="index-languages">
                 <div class="maintenance-action-label">Index languages</div>
                 <div class="maintenance-action-desc">
-                    <p>Read-only pass that records the language tag on every audio track, embedded subtitle, and external subtitle file across your libraries. Populates the dropdown above and the Dashboard's Language Distribution chart. No files are modified and Whisper is not loaded.</p>
+                    <p>Read-only pass that records the language tag on every audio track, embedded subtitle, and external subtitle file across your libraries. Populates the dropdowns above and the Dashboard's Language Distribution chart. No files are modified and Whisper is not loaded.</p>
                 </div>
                 <div class="maintenance-action-controls">
                     <button class="btn btn-secondary" id="btn-index-languages" onclick="indexLanguages()">Index languages now</button>
@@ -1496,6 +1519,8 @@ const logFilters = {
     external_subtitle: true,
     failed: true,
     silent_content: true,
+    inconclusive: true,
+    relabeled: true,
 };
 
 /* ── Navigation ────────────────────────────────────────────────────────── */
@@ -2334,6 +2359,7 @@ document.getElementById('toggle-advanced').addEventListener('change', function()
     });
     if (this.checked) {
         loadReprocessLanguages();
+        loadRelabelTargets();
         refreshIndexStatus();
     }
 });
@@ -2347,6 +2373,8 @@ const FLAG_META = {
     external_subtitle:  { label: 'External Subtitle Labeled',  short: 'E',      badge: 'badge-purple' },
     failed:             { label: 'Failed',             short: 'F',      badge: 'badge-red' },
     silent_content:     { label: 'Silent Content',     short: '\u26a0', badge: 'badge-warning-triangle' },
+    inconclusive:       { label: 'Inconclusive',       short: '?',      badge: 'badge-yellow' },
+    relabeled:          { label: 'Relabeled',          short: 'L',      badge: 'badge-purple' },
 };
 
 function buildTooltip(entry, flag) {
@@ -2357,7 +2385,7 @@ function buildTooltip(entry, flag) {
             return 'Remuxed to MKV';
         case 'audio_labeled':
             if (entry.track_details && entry.track_details.length) {
-                const labeled = entry.track_details.filter(t => t.detected_language !== 'zxx');
+                const labeled = entry.track_details.filter(t => t.detected_language !== 'zxx' && !t.inconclusive);
                 if (labeled.length)
                     return labeled.map(t =>
                         `Track ${t.track_index}: <span class="tt-dim">${t.previous_language || 'und'}</span> → <span class="tt-lang">${t.detected_language}</span>`
@@ -2396,6 +2424,26 @@ function buildTooltip(entry, flag) {
                     return silent.map(t => `Track ${t.track_index}: silent`).join('<br>');
             }
             return 'Silent content detected';
+        case 'inconclusive':
+            if (entry.track_details && entry.track_details.length) {
+                const unsure = entry.track_details.filter(t => t.inconclusive);
+                if (unsure.length)
+                    return unsure.map(t => {
+                        const prev = t.previous_language || 'und';
+                        const kept = prev !== 'und' ? ` <span class="tt-dim">(kept ${prev})</span>` : '';
+                        return `Track ${t.track_index}: no confident language${kept}`;
+                    }).join('<br>');
+            }
+            return 'No confident language detected';
+        case 'relabeled':
+            if (entry.track_details && entry.track_details.length) {
+                const changed = entry.track_details.filter(t => t.relabeled);
+                if (changed.length)
+                    return changed.map(t =>
+                        `Track ${t.track_index}: <span class="tt-dim">${t.previous_language}</span> → <span class="tt-lang">${t.detected_language}</span>`
+                    ).join('<br>');
+            }
+            return 'Language tag changed manually';
         default:
             return FLAG_META[flag]?.label || flag;
     }
@@ -2862,6 +2910,13 @@ function updateStatusUI(data) {
             break;
     }
 
+    _maintenanceBusy = !['idle', 'stopped', 'error'].includes(data.status);
+    const relabelFrom = document.getElementById('relabel-from-select');
+    const relabelTo = document.getElementById('relabel-to-select');
+    if (relabelFrom) relabelFrom.disabled = _maintenanceBusy;
+    if (relabelTo) relabelTo.disabled = _maintenanceBusy;
+    updateRelabelButton();
+
     controls.style.display = data.has_cron ? '' : 'none';
 
     // Last run summary
@@ -2884,7 +2939,9 @@ function updateStatusUI(data) {
         if (s.files_processed)
             parts.push('<span class="last-run-stat">Files processed: <strong>' + s.files_processed + '</strong></span>');
         if (s.audio_tracks_labeled)
-            parts.push('<span class="last-run-stat">Audio tracks labeled: <strong>' + s.audio_tracks_labeled + '</strong></span>');
+            parts.push('<span class="last-run-stat">' + (s.relabel_run ? 'Audio tracks changed' : 'Audio tracks labeled') + ': <strong>' + s.audio_tracks_labeled + '</strong></span>');
+        if (s.audio_tracks_inconclusive)
+            parts.push('<span class="last-run-stat" style="color:var(--warning)">Inconclusive audio: <strong>' + s.audio_tracks_inconclusive + '</strong></span>');
         if (s.subtitle_tracks_labeled)
             parts.push('<span class="last-run-stat">Subtitle tracks labeled: <strong>' + s.subtitle_tracks_labeled + '</strong></span>');
         if (s.external_subs_processed)
@@ -2896,18 +2953,17 @@ function updateStatusUI(data) {
         if (s.files_skipped)
             parts.push('<span class="last-run-stat">Skipped (already tracked): <strong>' + s.files_skipped + '</strong></span>');
 
-        const prefix = isDry ? 'Last run (DRY RUN PREVIEW) — ' : 'Last run — ';
+        const kind = (s.relabel_run ? `Last relabel run (${s.relabel_from} → ${s.relabel_to})` : 'Last run')
+            + (isDry ? ' (DRY RUN PREVIEW)' : '');
         const labelEl = document.querySelector('.last-run-label');
         if (data.last_run_time) {
             const timeStr = data.last_run_time.substring(11, 16);
             const dateStr = data.last_run_time.substring(0, 10);
             const today = (data.server_now || '').substring(0, 10);
             const label = (today && dateStr === today) ? 'Today at ' + timeStr : dateStr + ' ' + timeStr;
-            labelEl.textContent = prefix + label;
-        } else if (isDry) {
-            labelEl.textContent = 'Last run (DRY RUN PREVIEW)';
+            labelEl.textContent = kind + ' — ' + label;
         } else {
-            labelEl.textContent = 'Last run';
+            labelEl.textContent = kind;
         }
 
         statsDiv.innerHTML = parts.join('');
@@ -2947,7 +3003,7 @@ function clearMaintenanceAction() {
     applyMaintenanceRunningUI(false);
 }
 function applyMaintenanceRunningUI(running) {
-    for (const id of ['running-reprocess-language', 'running-index-languages', 'running-prune-orphans']) {
+    for (const id of ['running-reprocess-language', 'running-relabel-language', 'running-index-languages', 'running-prune-orphans']) {
         const el = document.getElementById(id);
         if (el) el.style.display = 'none';
     }
@@ -2977,6 +3033,7 @@ async function loadReprocessLanguages() {
             select.appendChild(opt);
             if (btn) btn.disabled = true;
             if (sourceLabel) sourceLabel.textContent = '';
+            fillRelabelFrom([]);
             return;
         }
         const placeholder = document.createElement('option');
@@ -2991,6 +3048,7 @@ async function loadReprocessLanguages() {
             select.appendChild(opt);
         }
         if (btn) btn.disabled = true;  // re-enable on selection
+        fillRelabelFrom(langs);
         select.onchange = () => {
             if (btn) btn.disabled = !select.value;
         };
@@ -3005,6 +3063,9 @@ async function loadReprocessLanguages() {
     } catch (e) {
         select.innerHTML = '<option value="">Failed to load languages</option>';
         if (btn) btn.disabled = true;
+        const relabelFrom = document.getElementById('relabel-from-select');
+        if (relabelFrom) relabelFrom.innerHTML = '<option value="">Failed to load languages</option>';
+        updateRelabelButton();
     }
 }
 
@@ -3037,6 +3098,120 @@ async function reprocessLanguage() {
         }
     } catch (e) {
         showToast('Failed to trigger reprocess run', 'error');
+    }
+}
+
+/* ── Maintenance: Change audio language tag ─────────────────────────────── */
+let _maintenanceBusy = true;
+let _relabelTargetsLoaded = false;
+
+function fillRelabelFrom(langs) {
+    const select = document.getElementById('relabel-from-select');
+    if (!select) return;
+    select.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = langs.length ? 'From language…' : 'No tracked audio languages yet';
+    select.appendChild(placeholder);
+    for (const l of langs) {
+        const opt = document.createElement('option');
+        opt.value = l.code;
+        opt.textContent = `${l.code} - ${l.name || 'Unknown'}`;
+        if (l.tracks != null) opt.dataset.tracks = l.tracks;
+        if (l.files != null) opt.dataset.files = l.files;
+        select.appendChild(opt);
+    }
+    updateRelabelButton();
+}
+
+async function loadRelabelTargets() {
+    const select = document.getElementById('relabel-to-select');
+    if (!select || _relabelTargetsLoaded) return;
+    try {
+        const res = await fetch('/api/languages/targets');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        select.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'To language…';
+        select.appendChild(placeholder);
+        for (const l of (data.languages || [])) {
+            const opt = document.createElement('option');
+            opt.value = l.code;
+            opt.textContent = `${l.code} - ${l.name || 'Unknown'}`;
+            select.appendChild(opt);
+        }
+        _relabelTargetsLoaded = true;
+    } catch (e) {
+        select.innerHTML = '<option value="">Failed to load languages</option>';
+    }
+    updateRelabelButton();
+}
+
+function updateRelabelButton() {
+    const btn = document.getElementById('btn-relabel-language');
+    if (!btn) return;
+    const from = document.getElementById('relabel-from-select');
+    const to = document.getElementById('relabel-to-select');
+    const ready = from && to && from.value && to.value && from.value !== to.value;
+    btn.disabled = _maintenanceBusy || !ready;
+}
+
+async function savedDryRun() {
+    try {
+        const res = await fetch('/api/config');
+        const opts = await res.json();
+        const opt = opts.find(o => o.key === 'dry_run');
+        return !!(opt && opt.value);
+    } catch (e) {
+        return false;
+    }
+}
+
+async function relabelLanguage() {
+    const from = document.getElementById('relabel-from-select');
+    const to = document.getElementById('relabel-to-select');
+    const src = from ? from.value : '';
+    const dst = to ? to.value : '';
+    if (!src || !dst) {
+        showToast('Pick both languages first', 'error');
+        return;
+    }
+    if (src === dst) {
+        showToast('Pick two different languages', 'error');
+        return;
+    }
+    const fromOpt = from.options[from.selectedIndex];
+    const toOpt = to.options[to.selectedIndex];
+    const fromText = fromOpt ? fromOpt.textContent : src;
+    const toText = toOpt ? toOpt.textContent : dst;
+    let scope = '';
+    if (fromOpt && fromOpt.dataset.tracks) {
+        const t = Number(fromOpt.dataset.tracks), f = Number(fromOpt.dataset.files);
+        scope = ` (${t} audio track${t === 1 ? '' : 's'} in ${f} file${f === 1 ? '' : 's'})`;
+    }
+    const dry = await savedDryRun();
+    const msg = `Change every audio track tagged "${fromText}"${scope} to "${toText}"?\n\n`
+        + 'Language detection is not run: the tags are rewritten in place across all configured libraries.'
+        + (dry ? '\n\nDry Run is enabled: nothing will be modified, the run log shows what would change.' : '');
+    if (!confirm(msg)) return;
+    try {
+        const res = await fetch('/api/scheduler/relabel-language', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: src, to: dst }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            setMaintenanceAction('relabel-language');
+            showToast(data.message || 'Relabel run triggered', 'success');
+            fetchStatus();
+        } else {
+            showToast(data.message || 'Failed to start relabel run', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to start relabel run', 'error');
     }
 }
 

@@ -48,6 +48,7 @@ def print_detailed_summary(
     total = len(video_results)
     acted = success = failed = processed = skipped = 0
     silent_files: list[str] = []
+    inconclusive_files: list[str] = []
 
     for r in video_results:
         if r.get("skipped_due_to_tracking"):
@@ -58,6 +59,7 @@ def print_detailed_summary(
         actions: list[str] = []
         has_fail = False
         has_silent = False
+        has_inconclusive = False
 
         if r["was_remuxed"]:
             actions.append("remuxed")
@@ -77,6 +79,12 @@ def print_detailed_summary(
             else:
                 actions.append(f"{CYAN}track{idx}: {prev_fmt} -> {lang_fmt}{RESET}")
 
+        for t in sorted(r.get("inconclusive_tracks", []), key=lambda x: x["track_index"]):
+            prev = t.get("previous_language", "und")
+            kept = "" if prev == "und" else f", kept {prev}"
+            actions.append(f"{YELLOW}track{t['track_index']}: und (inconclusive{kept}){RESET}")
+            has_inconclusive = True
+
         for idx in sorted(r.get("failed_tracks", [])):
             actions.append(f"{RED}track{idx}: failed{RESET}")
             has_fail = True
@@ -91,6 +99,8 @@ def print_detailed_summary(
                 success += 1
             if has_silent:
                 silent_files.append(name)
+            if has_inconclusive:
+                inconclusive_files.append(name)
         elif r["errors"]:
             print(f"{name}: {RED}error{RESET} – {r['errors'][0]}")
             acted += 1
@@ -116,6 +126,14 @@ def print_detailed_summary(
             print(f"{YELLOW}   - {f}{RESET}")
         if len(silent_files) > 5:
             print(f"{YELLOW}   ... and {len(silent_files) - 5} more{RESET}")
+
+    if inconclusive_files:
+        print(f"\n{YELLOW}⚠️  {len(inconclusive_files)} file(s) had audio with no "
+              f"confident language – tag left unchanged{RESET}")
+        for f in inconclusive_files[:5]:
+            print(f"{YELLOW}   - {f}{RESET}")
+        if len(inconclusive_files) > 5:
+            print(f"{YELLOW}   ... and {len(inconclusive_files) - 5} more{RESET}")
 
     if detector and detector.deletion_failures:
         print(f"\n{YELLOW}⚠️  WARNING: {len(detector.deletion_failures)} original file(s) could not be deleted{RESET}")

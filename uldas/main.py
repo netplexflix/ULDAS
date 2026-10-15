@@ -9,6 +9,7 @@ import tempfile
 import logging
 
 from uldas.constants import VERSION
+from uldas.utils import normalize_language_code
 from uldas.config import Config
 from uldas.logging_setup import setup_logging
 from uldas.tools import find_executable, find_mkvtoolnix_installation
@@ -146,6 +147,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "this ISO 639-3 code (e.g. 'zxx' for 'no speech', "
                         "'ja' for Japanese). Ignores tracking cache; skips "
                         "subtitle processing.")
+    p.add_argument("--relabel-language", metavar="FROM:TO", default=None,
+                   help="Change the tag of every audio track currently "
+                        "tagged FROM to TO (e.g. 'zxx:en'), without running "
+                        "language detection. Uses the language index; "
+                        "honors dry_run.")
     p.add_argument("--force-reprocess", action="store_true", default=None,
                    help="Force reprocessing, ignoring tracking cache (config: force_reprocess)")
     p.add_argument("--index-languages", action="store_true", default=None,
@@ -273,6 +279,13 @@ def _apply_cli_overrides(config: Config, args) -> None:
     if args.reprocess_language:
         config.reprocess_language = args.reprocess_language.strip().lower()
 
+    if args.relabel_language:
+        src, sep, dst = args.relabel_language.partition(":")
+        if not sep or not src.strip() or not dst.strip():
+            raise SystemExit("--relabel-language expects FROM:TO, e.g. zxx:en")
+        config.relabel_language_from = normalize_language_code(src)
+        config.relabel_language_to = normalize_language_code(dst)
+
     if args.force_reprocess:
         config.force_reprocess = True
 
@@ -345,6 +358,7 @@ def _build_run_summary(video_results: list, ext_sub_results: list,
     files_failed = 0
     files_skipped = 0
     audio_tracks_labeled = 0
+    audio_tracks_inconclusive = 0
     subtitle_tracks_labeled = 0
     files_remuxed = 0
 
@@ -360,6 +374,9 @@ def _build_run_summary(video_results: list, ext_sub_results: list,
 
         audio_tracks_labeled += len(r.get("processed_tracks", []))
         if r.get("processed_tracks"):
+            has_action = True
+        audio_tracks_inconclusive += len(r.get("inconclusive_tracks", []))
+        if r.get("inconclusive_tracks"):
             has_action = True
 
         sr = r.get("subtitle_results")
@@ -387,6 +404,7 @@ def _build_run_summary(video_results: list, ext_sub_results: list,
         "files_failed": files_failed,
         "files_remuxed": files_remuxed,
         "audio_tracks_labeled": audio_tracks_labeled,
+        "audio_tracks_inconclusive": audio_tracks_inconclusive,
         "subtitle_tracks_labeled": subtitle_tracks_labeled,
         "external_subs_processed": ext_subs_processed,
         "new_ext_subs": new_ext_subs,
@@ -502,6 +520,92 @@ def _try_reprocess_language_fast_path(detector, config: Config,
     return True
 
 
+def _validate_dirs(config: Config, state) -> bool:
+    """Check the configured library paths.
+
+    Returns False after reporting the problem to the web UI; exits the
+    process when running without a scheduler state.
+    """
+    msg = None
+    if not config.path:
+        msg = "No directories configured"
+    else:
+        for d in config.path:
+            if not os.path.isdir(d):
+                msg = f"Directory not found: {d}"
+                break
+    if msg is None:
+        return True
+    logger.error(msg)
+    if state is not None:
+        state.set_status("error", msg)
+        return False
+    sys.exit(1)
+
+
+def _run_relabel(config: Config, state, start: float) -> None:
+    """Change-language-tag maintenance run (no Whisper)."""
+    if not _validate_dirs(config, state):
+        return
+    missing = [n for n in ("ffprobe", "mkvpropedit") if not find_executable(n)]
+    if missing:
+        msg = f"Missing: {', '.join(missing)}"
+        logger.error(msg)
+        if state is not None:
+            state.set_status("error", msg)
+            return
+        sys.exit(1)
+
+    from uldas.relabel import relabel_audio_language
+
+    src, dst = config.relabel_language_from, config.relabel_language_to
+    try:
+        result = relabel_audio_language(
+            config, src, dst,
+            cancel_check=(state.is_stopped if state is not None else None),
+        )
+    except Exception as exc:
+        msg = f"Changing language tag failed: {exc}"
+        logger.error(msg, exc_info=True)
+        if state is not None:
+            state.set_status("error", msg)
+            return
+        sys.exit(1)
+
+    runtime = time.time() - start
+    dry = "[DRY RUN] " if result["dry_run"] else ""
+    print(f"\n{'=' * 60}")
+    print(f"{dry}CHANGE AUDIO LANGUAGE TAG {src} -> {dst} COMPLETE")
+    print(f"{'=' * 60}")
+    print(f"  Files matched:             {result['files_matched']}")
+    print(f"  Files changed:             {result['files_changed']}")
+    print(f"  Audio tracks changed:      {result['tracks_changed']}")
+    if result["files_failed"]:
+        print(f"  Failed:                    {result['files_failed']}")
+    if result["files_unsupported"]:
+        print(f"  Unsupported container:     {result['files_unsupported']}")
+    if result["files_stale"]:
+        print(f"  Stale index entries fixed: {result['files_stale']}")
+    if result["files_missing"]:
+        print(f"  Missing on disk:           {result['files_missing']}")
+    if result["files_ignored"]:
+        print(f"  Ignored (settings):        {result['files_ignored']}")
+    print(f"  Runtime:                   {runtime:.1f}s")
+
+    if state is not None:
+        state.set_last_run_summary({
+            "runtime_seconds": round(runtime, 1),
+            "relabel_run": True,
+            "relabel_from": src,
+            "relabel_to": dst,
+            "files_processed": result["files_changed"],
+            "audio_tracks_labeled": result["tracks_changed"],
+            "files_failed": result["files_failed"],
+            "dry_run": result["dry_run"],
+            "cancelled": result["cancelled"],
+        })
+
+
 def _run_processing(config: Config, skip_update_check: bool = False,
                     state: "Optional[SchedulerState]" = None,
                     config_path: str = "config/config.yml") -> None:
@@ -524,21 +628,8 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     # ── Index-languages one-shot mode ────────────────────────────────────
     if config.index_languages_only:
         _apply_temp_dir(config)
-        if not config.path:
-            msg = "No directories configured"
-            logger.error(msg)
-            if state is not None:
-                state.set_status("error", msg)
-                return
-            sys.exit(1)
-        for d in config.path:
-            if not os.path.isdir(d):
-                msg = f"Directory not found: {d}"
-                logger.error(msg)
-                if state is not None:
-                    state.set_status("error", msg)
-                    return
-                sys.exit(1)
+        if not _validate_dirs(config, state):
+            return
 
         from uldas.language_index import build_language_index, INDEX_FILENAME
 
@@ -591,26 +682,17 @@ def _run_processing(config: Config, skip_update_check: bool = False,
             })
         return
 
+    # ── Change-language-tag one-shot mode ────────────────────────────────
+    if config.relabel_language_from and config.relabel_language_to:
+        _run_relabel(config, state, start)
+        return
+
     # Apply temp_dir setting
     _apply_temp_dir(config)
 
     # Validate directories
-    if not config.path:
-        msg = "No directories configured"
-        logger.error(msg)
-        if state is not None:
-            state.set_status("error", msg)
-            return
-        sys.exit(1)
-
-    for d in config.path:
-        if not os.path.isdir(d):
-            msg = f"Directory not found: {d}"
-            logger.error(msg)
-            if state is not None:
-                state.set_status("error", msg)
-                return
-            sys.exit(1)
+    if not _validate_dirs(config, state):
+        return
 
     # Check dependencies
     deps = {
