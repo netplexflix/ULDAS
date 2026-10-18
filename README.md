@@ -93,7 +93,10 @@ services:
       #   "0 5 * * 5"    = every Friday at 5:00 AM
       # Alternative: use a simple hours interval instead of cron:
       # - SCHEDULE_HOURS=24
-      # Leave all scheduler env vars empty or remove them to run once and exit.
+      # To run once and exit instead of on a schedule, add `command: --once`
+      # and set `restart: "no"` (with `unless-stopped` Docker restarts the
+      # container, and the run, after every exit). Removing the scheduler env
+      # vars is not enough once a schedule has been saved to config.yml.
       #
       # NOTE: CRON_SCHEDULE / SCHEDULE_HOURS are only used as initial defaults
       # on first launch. Once saved to config.yml they can be edited live from
@@ -117,7 +120,7 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
-    restart: unless-stopped
+    restart: unless-stopped  # use "no" together with `command: --once` for a single run
 ```
 
 > [!NOTE]
@@ -242,9 +245,9 @@ Only Change these if you know what you're doing.
 - **whisper_model**: See Model Size Guide below
 - **device**: Hardware acceleration preference (auto, cpu, or cuda). Auto-detects CUDA GPU if available, falls back to CPU (Default: "auto")
 - **compute_type**: Precision/performance trade-off (auto, int8, float16, float32). Auto-selects optimal type based on device (Default: "auto")
-- **cpu_threads**:Number of CPU threads to use. 0 = automatic detection based on system cores (Default: 0)
+- **cpu_threads**: Number of CPU threads Whisper uses on CPU. 0 = all cores ULDAS is allowed to use (75% of the system's cores) (Default: 0)
 - **confidence_threshold**: Minimum Whisper language probability (0.0-1.0) for a single audio sample to be accepted immediately. Below it, the evidence of several samples spread over the runtime is pooled, and if that is still not convincing the entire audio track is analyzed. Tracks with no confident result are left as `und` and flagged *Inconclusive*. Higher values are more conservative but reduce false positives. (Default: 0.9)
-- **subtitle_confidence_threshold**: If subtitle detection confidence falls below confidence, the track is skipped
+- **subtitle_confidence_threshold**: If subtitle detection confidence falls below confidence, the track is skipped. Skipped tracks are not retried until the file changes (use Reprocess Specific Files to retry after changing the threshold)
 - **reprocess_all** : `true` will reprocess ALL audio tracks, even if they already have a language tag. (Default: `false`)
 - **reprocess_all_subtitles**: `true` will reprocess ALL subtitle tracks, even if they already have a language tag. (Default: `false`)
 - **operation_timeout_seconds**: 600,  # 10 minutes
@@ -282,6 +285,7 @@ Here you can edit settings and check your log.
 
 **Maintenance Actions** (Settings → Advanced):
 - **Reprocess audio tracks tagged as a specific language**: re-runs detection on every track with that tag (e.g. `zxx` or a suspicious `nl`).
+- **Reprocess specific files**: search the processed files by (partial) name, add as many as you like, and re-run detection on just those files. Every audio track is re-detected whatever its current tag, plus every embedded subtitle track when Process Subtitles is on. Dry Run is honored.
 - **Change audio language tag**: rewrites every audio track tagged X to Y across your libraries, *without* running detection. Use it when you know the right answer, e.g. `zxx` → `en` in an all-English library. Files are modified in place; Dry Run is honored.
 - **Index languages**: read-only pass that records every track's language tag; feeds the dropdowns above and the Dashboard chart.
 - **Prune missing files**: drops tracker entries for libraries you removed.
@@ -353,6 +357,7 @@ External subtitle File Formats:
 | `--find-mkv` | Locate MKVToolNix installation (Windows only) |
 | `--clear-tracking` | Clear all file processing tracking data and exit |
 | `--skip-update-check` | Skip checking for updates on startup |
+| `--once` | Run once and exit, even if a schedule is configured (Docker: `command: --once` with `restart: "no"`) |
 
 <a id="logging--output"></a>
 ### Logging & Output

@@ -179,8 +179,13 @@ def print_detailed_summary(
                     reset = RESET if colour else ""
                     print(f"  {colour}subtitle track{st['track_index']}: {prev} -> {lang}{reset} (conf: {conf:.2f}){flag_str}")
                 for st in sr.get("skipped_subtitle_tracks", []):
+                    if st.get("reason") == "confidence_below_threshold":
+                        detail = (f"detected: {st['detected_language']}, "
+                                  f"conf: {st['confidence']:.2f}")
+                    else:
+                        detail = str(st.get("reason", "unknown")).replace("_", " ")
                     print(f"  {YELLOW}subtitle track{st['track_index']}: skipped{RESET} "
-                          f"(detected: {st['detected_language']}, conf: {st['confidence']:.2f})")
+                          f"({detail})")
                 for idx in sr["failed_subtitle_tracks"]:
                     print(f"  {RED}subtitle track{idx}: failed{RESET}")
 
@@ -188,7 +193,7 @@ def print_detailed_summary(
             print(f"\nSubtitle tracks found: {t_found}")
             print(f"Successfully processed: {t_proc}")
             if t_skip:
-                print(f"{YELLOW}Skipped (low confidence): {t_skip}{RESET}")
+                print(f"{YELLOW}Skipped (not retried until the file changes): {t_skip}{RESET}")
             if t_fail:
                 print(f"{RED}Failed: {t_fail}{RESET}")
             if t_forced:

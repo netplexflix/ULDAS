@@ -85,29 +85,6 @@ def _unlink(path: Optional[Path]) -> None:
         pass
 
 
-# ── Volume check ─────────────────────────────────────────────────────────
-def has_reasonable_volume(ffmpeg: str, audio_path: Path) -> bool:
-    try:
-        cmd = [
-            ffmpeg, "-i", str(audio_path),
-            "-af", "volumedetect",
-            "-f", "null", "-", "-v", "quiet", "-stats",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace")
-        if "mean_volume:" in result.stderr:
-            for line in result.stderr.split("\n"):
-                if "mean_volume:" in line:
-                    try:
-                        db = float(line.split("mean_volume:")[1].split("dB")[0].strip())
-                        return db > -60.0
-                    except (ValueError, IndexError):
-                        pass
-        return True
-    except Exception:
-        return True
-
-
 # ── Decoding / VAD ───────────────────────────────────────────────────────
 def _decode_audio(audio_path: Path) -> Optional[np.ndarray]:
     """Decode *audio_path* to 16 kHz mono float32, or None on failure."""
@@ -165,9 +142,11 @@ def extract_audio_sample_percentage_based(
     stream_index: int,
     retry_attempt: int = 0,
     show_details: bool = False,
+    duration: Optional[float] = None,
 ) -> Optional[Path]:
     try:
-        duration = _get_file_duration(ffprobe, file_path, show_details)
+        if duration is None:
+            duration = _get_file_duration(ffprobe, file_path, show_details)
         if duration <= 0:
             duration = 7200
 
@@ -176,6 +155,10 @@ def extract_audio_sample_percentage_based(
 
         min_start = max(60, duration * 0.05)
         max_start = duration * 0.85
+        if min_start > max_start:
+            # Under ~70 s there's no intro to skip; starting at 60 s would
+            # land past the end of the file.
+            min_start = 0
 
         # One sample is taken per attempt: the first position that can be
         # extracted.  The first positions of successive attempts are spread
@@ -241,13 +224,13 @@ def extract_audio_sample_percentage_based(
                                    text=True, encoding="utf-8", errors="replace")
 
                     if tmp_path.exists() and tmp_path.stat().st_size > 10_000:
-                        if has_reasonable_volume(ffmpeg, tmp_path):
-                            if show_details:
-                                logger.info(
-                                    "Extracted audio from %dm%02ds",
-                                    seg_start // 60, seg_start % 60,
-                                )
-                            return tmp_path
+                        # Silent samples are caught later by VAD.
+                        if show_details:
+                            logger.info(
+                                "Extracted audio from %dm%02ds",
+                                seg_start // 60, seg_start % 60,
+                            )
+                        return tmp_path
                     if tmp_path.exists():
                         tmp_path.unlink()
                 except subprocess.CalledProcessError:
@@ -385,9 +368,14 @@ def _transcribe_text(whisper_model, audio: np.ndarray, language: str,
                      config, label: str) -> str:
     """Decode *audio* in *language* for the hallucination check.
 
+    Only the first language-ID window (30 s) is decoded, greedily: the
+    check needs a representative transcript, not all of the sample's
+    speech, and decoding dominates the time spent per sample.
+
     Whisper's own VAD stays off: *audio* is already speech-only when the
     VAD filter is enabled, and an empty VAD result crashes CTranslate2.
     """
+    audio = audio[:LID_WINDOW_S * SAMPLE_RATE]
     if config.show_details:
         logger.info("Transcribing %s (%s)...", label, language)
         _log_memory_usage(f"before_transcription_{label}")
@@ -396,8 +384,8 @@ def _transcribe_text(whisper_model, audio: np.ndarray, language: str,
         audio,
         language=language,
         task="transcribe",
-        beam_size=3,
-        best_of=2,
+        beam_size=1,
+        best_of=1,
         temperature=0.0,
         patience=1.0,
         length_penalty=1.0,
@@ -589,12 +577,14 @@ def detect_language_with_retries(
     stream_index: int,
     config,
     max_retries: int = 3,
+    duration: Optional[float] = None,
 ) -> Optional[str]:
     """Detect the spoken language of one audio track.
 
     Returns a language code, ``'zxx'`` (VAD found practically no speech
     in the whole track), :data:`INCONCLUSIVE` (there is speech but no
     confident language) or ``None`` (nothing could be analysed).
+    *duration* (seconds) saves probing the file on every attempt.
     """
     threshold = config.confidence_threshold
     samples: List[Dict] = []
@@ -606,7 +596,7 @@ def detect_language_with_retries(
 
         sample = extract_audio_sample_percentage_based(
             ffmpeg, ffprobe, file_path, audio_track_index, stream_index,
-            attempt, config.show_details,
+            attempt, config.show_details, duration=duration,
         )
         if not sample:
             continue

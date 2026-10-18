@@ -66,6 +66,7 @@ class TrackInfo:
     lang_offset: int         # absolute offset of the 2-byte language field
     current_lang: Optional[str]
     has_elng: bool = False
+    track_id: Optional[int] = None
 
 
 def is_mp4(path: Path) -> bool:
@@ -217,19 +218,66 @@ def _parse_trak(fp: BinaryIO, trak: Box) -> Optional[TrackInfo]:
     )
 
 
+def _read_track_id(fp: BinaryIO, trak: Box) -> Optional[int]:
+    """track_ID from the trak's ``tkhd`` box, or None."""
+    tkhd = _find_child(fp, trak, b"tkhd")
+    if tkhd is None:
+        return None
+    fp.seek(tkhd.body)
+    version = fp.read(1)
+    if not version:
+        return None
+    # FullBox(4) + creation/modification times (4+4 in v0, 8+8 in v1)
+    offset = tkhd.body + (12 if version[0] == 0 else 20)
+    if offset + 4 > tkhd.end:
+        return None
+    fp.seek(offset)
+    return struct.unpack(">I", fp.read(4))[0]
+
+
+def _chapter_track_ids(fp: BinaryIO, trak: Box) -> set:
+    """track_IDs this trak references as its chapter track (``tref/chap``)."""
+    tref = _find_child(fp, trak, b"tref")
+    if tref is None:
+        return set()
+    ids: set = set()
+    for ref in _iter_boxes(fp, tref.body, tref.end):
+        if ref.type != b"chap":
+            continue
+        count = (ref.end - ref.body) // 4
+        if count:
+            fp.seek(ref.body)
+            ids.update(struct.unpack(f">{count}I", fp.read(count * 4)))
+    return ids
+
+
 def list_tracks(fp: BinaryIO) -> List[TrackInfo]:
     """Enumerate every ``trak`` in file order (== ffprobe stream order),
-    with per-kind ordinals assigned."""
+    with per-kind ordinals assigned.
+
+    QuickTime chapter tracks (``text`` handler, referenced via ``tref/
+    chap``) are classed as "other": ffprobe reports them as data streams,
+    not subtitles, and counting them would make every subtitle write fail
+    the track-count check.
+    """
     moov = _find_moov(fp)
     if _find_child(fp, moov, b"cmov") is not None:
         raise ValueError("Compressed moov (cmov) is not supported")
 
+    traks = [child for child in _iter_boxes(fp, moov.body, moov.end)
+             if child.type == b"trak"]
+    chapter_ids: set = set()
+    for trak in traks:
+        chapter_ids |= _chapter_track_ids(fp, trak)
+
     tracks: List[TrackInfo] = []
     counts = {"audio": 0, "subtitle": 0, "video": 0, "other": 0}
-    for child in _iter_boxes(fp, moov.body, moov.end):
-        if child.type != b"trak":
-            continue
-        info = _parse_trak(fp, child)
+    for trak in traks:
+        info = _parse_trak(fp, trak)
+        info.track_id = _read_track_id(fp, trak)
+        if (info.kind == "subtitle" and info.track_id is not None
+                and info.track_id in chapter_ids):
+            info.kind = "other"
         info.ordinal = counts[info.kind]
         counts[info.kind] += 1
         tracks.append(info)

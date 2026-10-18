@@ -1,5 +1,6 @@
 #file: uldas/subtitles.py
 
+import functools
 import os
 import re
 import sys
@@ -14,6 +15,7 @@ from uldas.utils import (
     limit_subprocess_resources,
     convert_iso639_1_to_2,
     get_language_name,
+    mp4_language_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,91 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 #  Extraction
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Bitmap formats without an OCR path (mkvmerge codec IDs and ffprobe
+# names).  They can't be read, so they are skipped without extraction.
+_UNSUPPORTED_SUB_CODECS = {
+    "s_vobsub", "dvd_subtitle", "dvdsub",
+    "s_dvbsub", "dvb_subtitle", "dvbsub",
+}
+
+
+def is_unsupported_subtitle_codec(codec: Optional[str]) -> bool:
+    return (codec or "").lower() in _UNSUPPORTED_SUB_CODECS
+
+
+def _is_pgs_codec(codec: Optional[str]) -> bool:
+    codec = (codec or "").lower()
+    return "pgs" in codec or "hdmv" in codec
+
+
+def _subtitle_codec(info: Dict, subtitle_track_index: int) -> Optional[str]:
+    """Codec of the *subtitle_track_index*-th subtitle stream in *info*."""
+    count = 0
+    for stream in info.get("streams", []):
+        if stream.get("codec_type") == "subtitle":
+            if count == subtitle_track_index:
+                return (stream.get("codec_name") or "").lower()
+            count += 1
+    return None
+
+
+def extract_subtitle_tracks(
+    ffmpeg: str,
+    file_path: Path,
+    tracks: List[Tuple[int, int]],
+    get_mkv_info_fn,
+    show_details: bool = False,
+) -> Dict[int, Optional[Path]]:
+    """Extract several subtitle tracks in one pass over *file_path*.
+
+    *tracks* holds ``(subtitle_track_index, stream_index)`` pairs.  ffmpeg
+    has to read the whole container to collect one track's packets, so
+    extracting all of them in a single run saves a full read per extra
+    track.  Falls back to one run per track if the combined run fails.
+    Returns ``{subtitle_track_index: path or None}``.
+    """
+    if len(tracks) < 2:
+        return {idx: extract_subtitle_track(ffmpeg, file_path, idx, sidx,
+                                            get_mkv_info_fn, show_details)
+                for idx, sidx in tracks}
+
+    info = get_mkv_info_fn(file_path)
+    outputs: Dict[int, Path] = {}
+    cmd = [ffmpeg, "-y", "-v", "warning", "-i", str(file_path)]
+    for idx, _ in tracks:
+        is_image = _is_pgs_codec(_subtitle_codec(info, idx))
+        suffix, codec = (".sup", "copy") if is_image else (".srt", "srt")
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.close()
+        outputs[idx] = Path(tmp.name)
+        cmd += ["-map", f"0:s:{idx}", "-c:s", codec, str(outputs[idx])]
+
+    try:
+        subprocess.run(limit_subprocess_resources(cmd), check=True,
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        if show_details:
+            logger.info("Single-pass subtitle extraction failed (%s) – "
+                        "extracting tracks one by one", exc)
+        for p in outputs.values():
+            if p.exists():
+                p.unlink()
+        return {idx: extract_subtitle_track(ffmpeg, file_path, idx, sidx,
+                                            get_mkv_info_fn, show_details)
+                for idx, sidx in tracks}
+
+    result: Dict[int, Optional[Path]] = {}
+    for idx, path in outputs.items():
+        if path.exists() and path.stat().st_size > 100:
+            result[idx] = path
+        else:
+            if path.exists():
+                path.unlink()
+            result[idx] = None
+    return result
+
 
 def extract_subtitle_track(
     ffmpeg: str,
@@ -34,29 +121,9 @@ def extract_subtitle_track(
     """Extract a subtitle track to ``.srt`` (text) or ``.sup`` (image)."""
     try:
         info = get_mkv_info_fn(file_path)
-        subtitle_codec = None
+        subtitle_codec = _subtitle_codec(info, subtitle_track_index)
 
-        if "streams" in info:
-            count = 0
-            for stream in info["streams"]:
-                if stream.get("codec_type") == "subtitle":
-                    if count == subtitle_track_index:
-                        subtitle_codec = stream.get("codec_name", "").lower()
-                        break
-                    count += 1
-
-        image_codecs = {
-            "hdmv_pgs_subtitle", "pgs", "dvdsub", "dvbsub",
-            "dvd_subtitle", "s_hdmv/pgs",
-        }
-        is_image = (
-            subtitle_codec in image_codecs
-            or "pgs" in (subtitle_codec or "")
-            or "hdmv" in (subtitle_codec or "")
-            or "dvd" in (subtitle_codec or "")
-        )
-
-        if is_image:
+        if _is_pgs_codec(subtitle_codec):
             suffix, copy_codec = ".sup", "copy"
         else:
             suffix, copy_codec = ".srt", "srt"
@@ -182,7 +249,8 @@ def detect_subtitle_language(
             try:
                 if file_path and subtitle_track_index is not None and stream_index is not None:
                     return _extract_pgs_images_and_ocr(
-                        ffmpeg, file_path, subtitle_track_index, stream_index, show_details,
+                        ffmpeg, file_path, subtitle_track_index, stream_index,
+                        show_details, sup_path=subtitle_path,
                     )
                 return None
             except ImportError:
@@ -259,17 +327,88 @@ def _detect_language_by_characters(text: str, subtitle_count: int) -> Optional[D
 #  PGS / OCR
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Mean Tesseract word confidence (0-100) below which OCR output is treated
+# as unreadable (e.g. a script the installed language data doesn't cover)
+# rather than handed to language detection.
+_MIN_OCR_CONFIDENCE = 50.0
+# Frames OCR'd per Tesseract call (stacked into one image), and the gap
+# between them.  One process per batch instead of one per frame.
+_OCR_BATCH = 10
+_OCR_GAP = 24
+
+
+def _prepare_frame(img):
+    """Crop a subtitle frame to its visible content and turn it into dark
+    text on a light background, which is what Tesseract reads best.
+    Returns None for blank ('clear') frames."""
+    from PIL import Image, ImageOps, ImageEnhance
+
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
+        bg.alpha_composite(img)
+        img = bg
+    gray = img.convert("L")
+    bbox = gray.getbbox()
+    if not bbox:
+        return None
+    left, top, right, bottom = bbox
+    pad = 10
+    gray = gray.crop((max(0, left - pad), max(0, top - pad),
+                      min(gray.width, right + pad), min(gray.height, bottom + pad)))
+    return ImageEnhance.Contrast(ImageOps.invert(gray)).enhance(2.0)
+
+
+def _ocr_frames(pytesseract, frames: list) -> Tuple[str, List[float]]:
+    """OCR prepared frames: returns (text, word confidences).
+
+    Frames are stacked vertically in batches so Tesseract starts once per
+    batch rather than once per frame.
+    """
+    from PIL import Image
+
+    words: List[str] = []
+    confs: List[float] = []
+    for start in range(0, len(frames), _OCR_BATCH):
+        batch = frames[start:start + _OCR_BATCH]
+        width = max(f.width for f in batch)
+        height = sum(f.height for f in batch) + _OCR_GAP * (len(batch) - 1)
+        sheet = Image.new("L", (width, height), 255)
+        y = 0
+        for frame in batch:
+            sheet.paste(frame, (0, y))
+            y += frame.height + _OCR_GAP
+        data = pytesseract.image_to_data(
+            sheet, config="--psm 6", output_type=pytesseract.Output.DICT,
+        )
+        for word, conf in zip(data.get("text", []), data.get("conf", [])):
+            try:
+                conf = float(conf)
+            except (TypeError, ValueError):
+                continue
+            if conf < 0 or not str(word).strip():
+                continue
+            words.append(str(word).strip())
+            confs.append(conf)
+    return " ".join(words), confs
+
+
 def _extract_pgs_images_and_ocr(
     ffmpeg: str,
     file_path: Path,
     subtitle_track_index: int,
     stream_index: int,
     show_details: bool = False,
+    sup_path: Optional[Path] = None,
 ) -> Optional[Dict]:
-    """Extract PGS subtitle images and OCR them for language detection."""
+    """Extract PGS subtitle images and OCR them for language detection.
+
+    Images come from the already-extracted *sup_path* when given (a few
+    MB), falling back to the source file only if that yields nothing.
+    """
     try:
         import pytesseract
-        from PIL import Image, ImageEnhance
+        from PIL import Image
     except ImportError as exc:
         logger.error("Required library not installed: %s", exc)
         return None
@@ -294,14 +433,15 @@ def _extract_pgs_images_and_ocr(
     try:
         # Try several extraction methods
         image_files: list[Path] = []
-        for method_cmd in _pgs_extraction_commands(ffmpeg, file_path, subtitle_track_index, tmp_dir):
+        for method_cmd in _pgs_extraction_commands(
+                ffmpeg, file_path, subtitle_track_index, tmp_dir, sup_path):
             try:
                 limited = limit_subprocess_resources(method_cmd)
                 subprocess.run(limited, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=120)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 pass
-            image_files = list(Path(tmp_dir).glob("sub_*.png"))
+            image_files = sorted(Path(tmp_dir).glob("sub_*.png"))
             if image_files:
                 break
 
@@ -309,53 +449,96 @@ def _extract_pgs_images_and_ocr(
             logger.warning("No subtitle images extracted")
             return None
 
-        ocr_texts: list[str] = []
-        for img_file in image_files[:30]:
+        frames: list = []
+        for img_file in image_files:
+            if len(frames) >= 30:
+                break
             try:
-                img = Image.open(img_file).convert("L")
-                img = ImageEnhance.Contrast(img).enhance(2.0)
-                text = pytesseract.image_to_string(img, config="--psm 6")
-                if text.strip() and len(text.strip()) > 2:
-                    ocr_texts.append(text.strip())
+                with Image.open(img_file) as img:
+                    frame = _prepare_frame(img)
+                if frame is not None:
+                    frames.append(frame)
             except Exception:
                 continue
 
-        if not ocr_texts:
+        if not frames:
             return None
 
-        combined = " ".join(ocr_texts)
+        try:
+            combined, confidences = _ocr_frames(pytesseract, frames)
+        except Exception as exc:
+            logger.warning("PGS OCR failed: %s", exc)
+            return None
         if len(combined.strip()) < 50:
             return None
+
+        mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        if show_details:
+            logger.info("PGS OCR: %d frame(s), mean word confidence %.0f",
+                        len(frames), mean_conf)
+        if mean_conf < _MIN_OCR_CONFIDENCE:
+            # Unreadable OCR output (often a script without installed
+            # Tesseract data): no language evidence.
+            return {"language_code": "und", "confidence": 0.0,
+                    "subtitle_count": len(frames)}
 
         try:
             import langdetect
             from langdetect import detect_langs
+            langdetect.DetectorFactory.seed = 0
             detected = detect_langs(combined)
             if detected:
                 primary = detected[0]
                 code = convert_iso639_1_to_2(primary.lang)
                 return {
                     "language_code": code,
-                    "confidence": primary.prob * 0.75,
-                    "subtitle_count": len(ocr_texts),
+                    "confidence": primary.prob,
+                    "subtitle_count": len(frames),
                 }
         except ImportError:
-            return _detect_language_by_characters(combined, len(ocr_texts))
+            return _detect_language_by_characters(combined, len(frames))
         except Exception:
-            return _detect_language_by_characters(combined, len(ocr_texts))
+            return _detect_language_by_characters(combined, len(frames))
 
         return None
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def _pgs_extraction_commands(ffmpeg, file_path, sub_idx, tmp_dir):
+@functools.lru_cache(maxsize=None)
+def _passthrough_args(ffmpeg: str) -> tuple:
+    """Frame-timing passthrough option for *ffmpeg*: ``-fps_mode`` (FFmpeg
+    5.1+) where available, since the deprecated ``-vsync`` will be dropped;
+    ``-vsync 0`` for older builds."""
+    try:
+        r = subprocess.run([ffmpeg, "-hide_banner", "-h", "full"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+        if "-fps_mode" in r.stdout:
+            return ("-fps_mode", "passthrough")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ("-vsync", "0")
+
+
+def _pgs_extraction_commands(ffmpeg, file_path, sub_idx, tmp_dir, sup_path=None):
     """Yield ffmpeg commands to try for PGS image extraction."""
+    passthrough = _passthrough_args(ffmpeg)
+    if sup_path is not None and Path(sup_path).exists():
+        # Render from the extracted .sup: no second read of the source.
+        # PGS is at most 1920x1080, so that canvas always fits.
+        yield [
+            ffmpeg, "-y", "-v", "warning",
+            "-canvas_size", "1920x1080", "-i", str(sup_path),
+            "-filter_complex", "[0:s:0]scale=iw:ih[sub]",
+            "-map", "[sub]", "-frames:v", "50", *passthrough,
+            f"{tmp_dir}/sub_%04d.png",
+        ]
     yield [
         ffmpeg, "-y", "-v", "warning",
         "-i", str(file_path),
         "-filter_complex", f"[0:s:{sub_idx}]scale=iw:ih[sub]",
-        "-map", "[sub]", "-frames:v", "50", "-vsync", "0",
+        "-map", "[sub]", "-frames:v", "50", *passthrough,
         f"{tmp_dir}/sub_%04d.png",
     ]
     # Method 2: extract .sup then convert
@@ -368,7 +551,7 @@ def _pgs_extraction_commands(ffmpeg, file_path, sub_idx, tmp_dir):
     # (if sup exists, caller will re-glob)
     yield [
         ffmpeg, "-y", "-v", "warning",
-        "-i", sup, "-frames:v", "50", "-vsync", "0",
+        "-i", sup, "-frames:v", "50", *passthrough,
         f"{tmp_dir}/sub_%04d.png",
     ]
     # Method 3: overlay
@@ -376,7 +559,7 @@ def _pgs_extraction_commands(ffmpeg, file_path, sub_idx, tmp_dir):
         ffmpeg, "-y", "-v", "warning",
         "-i", str(file_path),
         "-filter_complex", f"[0:v][0:s:{sub_idx}]overlay[v]",
-        "-map", "[v]", "-frames:v", "50", "-vsync", "0", "-q:v", "2",
+        "-map", "[v]", "-frames:v", "50", *passthrough, "-q:v", "2",
         f"{tmp_dir}/sub_%04d.png",
     ]
 
@@ -482,20 +665,31 @@ def detect_forced_pgs_subtitles(
     file_path: Path,
     subtitle_track_index: int,
     show_details: bool = False,
+    sup_path: Optional[Path] = None,
+    duration: Optional[float] = None,
 ) -> bool:
-    """Heuristic forced detection for PGS subtitles based on frame count."""
+    """Heuristic forced detection for PGS subtitles based on frame count.
+
+    Packets are counted in the extracted *sup_path* when given; counting
+    them in the source means reading the whole file.
+    """
     try:
-        from uldas.audio import _get_file_duration
-        duration = _get_file_duration(ffprobe, file_path, show_details)
+        if duration is None:
+            from uldas.audio import _get_file_duration
+            duration = _get_file_duration(ffprobe, file_path, show_details)
         if duration <= 0:
             return False
 
+        if sup_path is not None and Path(sup_path).exists():
+            target, stream = sup_path, "s:0"
+        else:
+            target, stream = file_path, f"s:{subtitle_track_index}"
         cmd = [
             ffprobe, "-v", "error",
-            "-select_streams", f"s:{subtitle_track_index}",
+            "-select_streams", stream,
             "-count_packets",
             "-show_entries", "stream=nb_read_packets",
-            "-of", "csv=p=0", str(file_path),
+            "-of", "csv=p=0", str(target),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True,
                                 encoding="utf-8", errors="replace")
@@ -585,6 +779,29 @@ def detect_sdh_subtitles(subtitle_path: Path) -> bool:
 #  Metadata update
 # ═══════════════════════════════════════════════════════════════════════════
 
+_GENERATED_NAME_TAGS = (" [Forced]", " [SDH]")
+
+
+@functools.lru_cache(maxsize=1)
+def _language_name_set() -> frozenset:
+    from uldas.constants import LANGUAGE_NAMES
+    return frozenset(LANGUAGE_NAMES.values())
+
+
+def _is_generated_name(name: str) -> bool:
+    """True if *name* looks like a name ULDAS wrote ('English [SDH]')."""
+    base = name.strip()
+    stripped = True
+    while stripped:
+        stripped = False
+        for tag in _GENERATED_NAME_TAGS:
+            if base.endswith(tag):
+                base = base[:-len(tag)]
+                stripped = True
+    return (base in _language_name_set()
+            or re.fullmatch(r"[A-Z]{2,3}(-[A-Z0-9]+)*", base) is not None)
+
+
 def update_subtitle_metadata(
     mkvpropedit: str,
     file_path: Path,
@@ -596,14 +813,21 @@ def update_subtitle_metadata(
     show_details: bool = False,
     is_mp4: bool = False,
     expected_count: Optional[int] = None,
+    set_forced: bool = True,
+    current_name: Optional[str] = None,
 ) -> bool:
     """Write language (and, for MKV, name + forced flag) to a subtitle track.
 
     With ``is_mp4`` the tag is patched in place via :mod:`uldas.mp4`;
     MP4 has no track name or forced flag, so only the language is set.
+
+    The forced flag is only written when *set_forced* (forced analysis
+    actually ran).  An existing track name ("Signs & Songs",
+    "Commentary", …) is kept unless it is one ULDAS generated; SDH is
+    then recorded with the hearing-impaired flag instead.
     """
     if is_mp4:
-        lang3 = convert_iso639_1_to_2(language_code.split("-")[0].lower())
+        lang3 = mp4_language_code(language_code)
         if dry_run:
             print(f"[DRY RUN] Would update subtitle track {track_index}: "
                   f"language={lang3} (MP4: language only)")
@@ -617,30 +841,46 @@ def update_subtitle_metadata(
                         "name/forced flag not supported)", track_index, lang3)
         return ok
 
-    name_parts = [get_language_name(language_code)]
-    if is_forced:
-        name_parts.append("[Forced]")
-    if is_sdh:
-        name_parts.append("[SDH]")
-    track_name = " ".join(name_parts)
+    keep_name = bool(current_name and current_name.strip()
+                     and not _is_generated_name(current_name))
+    if keep_name:
+        track_name = current_name.strip()
+    else:
+        name_parts = [get_language_name(language_code)]
+        if is_forced and set_forced:
+            name_parts.append("[Forced]")
+        if is_sdh:
+            name_parts.append("[SDH]")
+        track_name = " ".join(name_parts)
+
+    edits = ["--set", f"language={language_code}"]
+    if not keep_name:
+        edits += ["--set", f"name={track_name}"]
+    if set_forced:
+        edits += ["--set", f"flag-forced={'1' if is_forced else '0'}"]
+    hearing_flag = ["--set", "flag-hearing-impaired=1"] if (is_sdh and keep_name) else []
 
     if dry_run:
         print(f"[DRY RUN] Would update subtitle track {track_index}: "
-              f"language={language_code}, name='{track_name}'")
+              f"language={language_code}, name='{track_name}'"
+              + (" (kept)" if keep_name else ""))
         return True
 
+    base = [mkvpropedit, str(file_path), "--edit", f"track:s{track_index + 1}"]
     try:
-        cmd = [
-            mkvpropedit, str(file_path),
-            "--edit", f"track:s{track_index + 1}",
-            "--set", f"language={language_code}",
-            "--set", f"name={track_name}",
-            "--set", f"flag-forced={'1' if is_forced else '0'}",
-        ]
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        try:
+            subprocess.run(base + edits + hearing_flag, capture_output=True,
+                           text=True, check=True)
+        except subprocess.CalledProcessError:
+            if not hearing_flag:
+                raise
+            # MKVToolNix < 57 doesn't know the hearing-impaired flag.
+            subprocess.run(base + edits, capture_output=True, text=True,
+                           check=True)
         if show_details:
-            logger.info("Updated subtitle track %d: lang=%s name='%s'",
-                        track_index, language_code, track_name)
+            logger.info("Updated subtitle track %d: lang=%s name='%s'%s",
+                        track_index, language_code, track_name,
+                        " (existing name kept)" if keep_name else "")
         return True
     except subprocess.CalledProcessError as exc:
         logger.error("Error updating subtitle metadata: %s", exc)

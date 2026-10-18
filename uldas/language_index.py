@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from concurrent.futures import ThreadPoolExecutor
+
 from uldas.constants import (
+    DISC_STRUCTURE_DIRS,
     EXTERNAL_SUBTITLE_EXTENSIONS,
     MP4_EXTENSIONS,
     scan_video_extensions,
@@ -73,13 +76,18 @@ def _probe_track_langs(ffprobe: str, file_path: Path,
             cmd, capture_output=True, text=True, check=True,
             encoding="utf-8", errors="replace",
         )
-        streams = json.loads(r.stdout).get("streams", []) or []
+        info = json.loads(r.stdout) or {}
     except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
         return [], []
+    return track_langs_from_info(info)
 
+
+def track_langs_from_info(info: dict) -> "tuple[list[str], list[str]]":
+    """``(audio_codes, subtitle_codes)`` from ffprobe-shaped stream info
+    (``MKVLanguageDetector.get_mkv_info`` returns the same shape)."""
     audio = []
     subs = []
-    for s in streams:
+    for s in (info or {}).get("streams", []) or []:
         codec_type = s.get("codec_type")
         if codec_type not in ("audio", "subtitle"):
             continue
@@ -232,6 +240,24 @@ class LanguageIndex:
             if key in self._data["per_ext_sub"]:
                 del self._data["per_ext_sub"][key]
                 self._dirty = True
+
+    def replace_under(self, directory: str, files: dict, ext_subs: dict,
+                      merge: bool = False) -> None:
+        """Swap in a completed rebuild of *directory*: every existing entry
+        under it is replaced by *files* / *ext_subs* (absolute path keys).
+        With *merge* (the walk missed some folders) existing entries are
+        only updated, never removed."""
+        if self._read_only:
+            return
+        prefixes = _normalize_path_prefixes([directory])
+        with self._lock:
+            for bucket, new in (("per_file", files), ("per_ext_sub", ext_subs)):
+                data = self._data[bucket]
+                if not merge:
+                    for k in [k for k in data if not _key_outside(k, prefixes)]:
+                        del data[k]
+                data.update(new)
+            self._dirty = True
 
     def prune_outside_paths(self, configured_paths: list) -> dict:
         """Remove index entries whose path is not under any of
@@ -431,30 +457,18 @@ def _atomic_write_json(path: str, data: dict) -> None:
         raise
 
 
-# ── Public read helper (routes / UI) ─────────────────────────────────────
-def load_language_index(config_dir: str = "config") -> Optional[dict]:
-    """Return the parsed language index snapshot, or None if missing/empty."""
-    path = os.path.join(config_dir, INDEX_FILENAME)
-    if not os.path.exists(path):
-        return None
-    try:
-        idx = LanguageIndex(config_dir=config_dir, read_only=True)
-        snap = idx.snapshot()
-        # If the file is an empty skeleton (nothing indexed yet), treat as missing.
-        if (not snap.get("per_file") and not snap.get("per_ext_sub")
-                and not snap.get("indexed_at")):
-            return None
-        # Add legacy-shaped convenience fields so the existing /api/stats
-        # response can keep its shape.
-        snap["video_files_indexed"] = len(snap.get("per_file") or {})
-        snap["external_sub_files_indexed"] = len(snap.get("per_ext_sub") or {})
-        return snap
-    except Exception as exc:
-        logger.warning("Could not load language index: %s", exc)
-        return None
-
-
 # ── Full rebuild (the "Index Languages" maintenance action) ──────────────
+_PROBE_WORKERS = 4      # parallel mkvmerge / ffprobe calls
+_PROBE_BATCH = 64       # videos per batch between cancel / progress checks
+
+
+def _report(msg: str, show_details: bool) -> None:
+    if show_details:
+        logger.info(msg)
+    else:
+        print(msg, flush=True)
+
+
 def build_language_index(
     directories: list,
     output_path: str,
@@ -476,20 +490,9 @@ def build_language_index(
     config_dir = os.path.dirname(output_path) or "config"
     idx = LanguageIndex(config_dir=config_dir)
 
-    # Drop any existing entries for files under the directories we are
-    # about to walk — they'll be re-populated from disk truth below.
-    prefixes = _normalize_path_prefixes(directories)
-    with idx._lock:
-        removed_files = [k for k in list(idx._data["per_file"])
-                         if not _key_outside(k, prefixes)]
-        for k in removed_files:
-            del idx._data["per_file"][k]
-        removed_ext = [k for k in list(idx._data["per_ext_sub"])
-                       if not _key_outside(k, prefixes)]
-        for k in removed_ext:
-            del idx._data["per_ext_sub"][k]
-        if removed_files or removed_ext:
-            idx._dirty = True
+    # Each directory is rebuilt off to the side and swapped in only once
+    # its walk completes, so a cancelled or crashed rebuild keeps the
+    # previous entries instead of leaving the index half empty.
 
     video_exts: set = scan_video_extensions(include_non_mkv_video, include_mp4)
     sub_exts: set = EXTERNAL_SUBTITLE_EXTENSIONS
@@ -508,7 +511,6 @@ def build_language_index(
     dirs_scanned = 0
     started = time.monotonic()
     last_report = started
-    last_save = started
     cancelled = False
 
     for directory in directories or []:
@@ -524,18 +526,30 @@ def build_language_index(
         else:
             print(f"Indexing languages under: {directory}", flush=True)
 
-        for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
+        new_files: dict = {}
+        new_ext_subs: dict = {}
+        videos: list = []          # (key, path), probed after the walk
+        walk_errors: list = []
+
+        def _walk_error(exc: OSError, _errors=walk_errors) -> None:
+            _errors.append(exc)
+            logger.warning("Could not list %s: %s",
+                           getattr(exc, "filename", "?"), exc)
+
+        for dirpath, dirnames, filenames in os.walk(
+                directory, followlinks=False, onerror=_walk_error):
             if cancel_check and cancel_check():
                 cancelled = True
                 break
             dirs_scanned += 1
-            # Prune ignored directories in place so os.walk never
-            # descends into them (only when the toggle is enabled).
-            if match_dirs:
-                keep = [d for d in dirnames
-                        if not any(tag in d.lower() for tag in ignore_lower)]
-                dirs_skipped += len(dirnames) - len(keep)
-                dirnames[:] = keep
+            # Prune ignored directories (when the toggle is enabled) and
+            # Blu-ray / DVD folder structures so os.walk never descends.
+            keep = [d for d in dirnames
+                    if d.lower() not in DISC_STRUCTURE_DIRS
+                    and not (match_dirs
+                             and any(tag in d.lower() for tag in ignore_lower))]
+            dirs_skipped += len(dirnames) - len(keep)
+            dirnames[:] = keep
             for filename in filenames:
                 dot = filename.rfind(".")
                 if dot <= 0:
@@ -554,36 +568,64 @@ def build_language_index(
 
                 full = os.path.join(dirpath, filename)
                 path = Path(full)
+                key = os.path.abspath(full)
+                if ext == ".sub" and ext_sub_mod.is_vobsub_data(path):
+                    continue    # counted once, via its .idx
 
                 if ext in video_exts:
-                    audio_codes, sub_codes = _probe_track_langs(
-                        ffprobe, path, mkvmerge=mkvmerge,
-                        mp4_inplace=include_mp4,
-                    )
-                    videos_indexed += 1
-                    idx.update_file(path, audio_codes, sub_codes)
+                    videos.append((key, path))
                 else:  # ext in sub_exts
                     ext_subs_indexed += 1
                     lang = ext_sub_mod.get_language_tag(path)
-                    idx.update_ext_sub(path, lang)
+                    new_ext_subs[key] = (normalize_language_code(lang)
+                                         if lang else "und")
 
             now = time.monotonic()
             if now - last_report >= 5.0:
                 last_report = now
-                msg = (
-                    f"Indexing… {dirs_scanned} dirs, "
-                    f"{videos_indexed} videos, {ext_subs_indexed} ext subs"
-                )
-                if show_details:
-                    logger.info(msg)
-                else:
-                    print(msg, flush=True)
-            # Periodic flush so progress isn't lost on a crash / cancel
-            if now - last_save >= 30.0:
-                last_save = now
-                idx.save_if_dirty()
+                _report(f"Indexing… {dirs_scanned} dirs, {len(videos)} videos "
+                        f"found, {ext_subs_indexed} ext subs", show_details)
 
-    idx.note_indexed_now(directories)
+        # Probe the videos in parallel: mkvmerge / ffprobe calls wait on
+        # (network) storage far more than they use CPU.
+        if not cancelled and videos:
+            def _probe(item):
+                key, path = item
+                return key, _probe_track_langs(ffprobe, path, mkvmerge=mkvmerge,
+                                               mp4_inplace=include_mp4)
+
+            with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+                for start in range(0, len(videos), _PROBE_BATCH):
+                    if cancel_check and cancel_check():
+                        cancelled = True
+                        break
+                    batch = videos[start:start + _PROBE_BATCH]
+                    for key, (audio_codes, sub_codes) in pool.map(_probe, batch):
+                        new_files[key] = {"audio": list(audio_codes),
+                                          "embedded_subs": list(sub_codes)}
+                        videos_indexed += 1
+                    now = time.monotonic()
+                    if now - last_report >= 5.0:
+                        last_report = now
+                        _report(f"Indexing… {videos_indexed}/{len(videos)} "
+                                f"videos probed", show_details)
+
+        if cancelled:
+            logger.info("Indexing cancelled – keeping the previous index "
+                        "entries for %s", directory)
+            break
+        if walk_errors:
+            # Files under unreadable folders are absent from this walk, not
+            # gone: keep their existing entries.
+            logger.warning("%d folder(s) under %s could not be read – keeping "
+                           "their previous index entries", len(walk_errors),
+                           directory)
+        idx.replace_under(directory, new_files, new_ext_subs,
+                          merge=bool(walk_errors))
+        idx.save_if_dirty()
+
+    if not cancelled:
+        idx.note_indexed_now(directories)
     ignored_pruned = idx.prune_ignored_tags(
         ignore_tags, match_dirs=ignore_tags_match_dirs, roots=directories,
     )

@@ -19,7 +19,7 @@ from uldas.language_index import (
 )
 from uldas.tools import find_executable
 from uldas.tracking import ProcessingTracker
-from uldas.utils import convert_iso639_1_to_2, normalize_language_code
+from uldas.utils import mp4_language_code, normalize_language_code
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def _write_audio_languages(mkvpropedit: str, file_path: Path,
                            mp4_inplace: bool, audio_count: int) -> bool:
     """Set *code* on the given audio ordinals of *file_path*."""
     if mp4_inplace:
-        lang3 = convert_iso639_1_to_2(code.split("-")[0].lower())
+        lang3 = mp4_language_code(code)
         return all(
             mp4_mod.set_track_language(file_path, "audio", idx, lang3,
                                        expected_count=audio_count)
@@ -147,7 +147,6 @@ def relabel_audio_language(
                       "previous_language": src, "relabeled": True}
                      for i in targets],
                     audio_ok=False,
-                    add_flags=("relabeled",),
                 )
 
             audio_codes, sub_codes = _probe_track_langs(

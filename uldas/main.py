@@ -11,7 +11,7 @@ import logging
 from uldas.constants import VERSION
 from uldas.utils import normalize_language_code
 from uldas.config import Config
-from uldas.logging_setup import setup_logging
+from uldas.logging_setup import setup_logging, set_console_level
 from uldas.tools import find_executable, find_mkvtoolnix_installation
 from uldas.tracking import ProcessingTracker
 from uldas.updater import check_for_updates
@@ -62,6 +62,19 @@ def _tune_third_party_logging(show_details: bool) -> None:
     )
 
 
+def _apply_console_level(config: Config, cli_args=None) -> None:
+    """Console output level for *config*: everything with Show Details (its
+    progress lines are INFO), otherwise warnings — errors only with
+    ``--quiet``.  The log file always records DEBUG."""
+    if config.show_details:
+        level = logging.DEBUG
+    elif cli_args is not None and getattr(cli_args, "quiet", False):
+        level = logging.ERROR
+    else:
+        level = logging.WARNING
+    set_console_level(level)
+
+
 def _apply_temp_dir(config: Config) -> None:
     """Override the global tempfile directory if configured."""
     temp_dir = config.temp_dir
@@ -89,6 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Clear all tracking data and exit")
     p.add_argument("--skip-update-check", action="store_true",
                    help="Skip checking for updates on startup")
+    p.add_argument("--once", action="store_true",
+                   help="Run once and exit, even if a schedule is configured")
 
     # ── Logging ──────────────────────────────────────────────────────────
     p.add_argument("--verbose", "-v", action="store_true",
@@ -144,9 +159,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Reprocess all audio tracks, even those already tagged (config: reprocess_all)")
     p.add_argument("--reprocess-language", metavar="CODE", default=None,
                    help="Re-detect only audio tracks currently tagged with "
-                        "this ISO 639-3 code (e.g. 'zxx' for 'no speech', "
-                        "'ja' for Japanese). Ignores tracking cache; skips "
-                        "subtitle processing.")
+                        "this language code, 2- or 3-letter (e.g. 'zxx' for "
+                        "'no speech', 'ja' or 'jpn' for Japanese). Ignores "
+                        "tracking cache; skips subtitle processing.")
     p.add_argument("--relabel-language", metavar="FROM:TO", default=None,
                    help="Change the tag of every audio track currently "
                         "tagged FROM to TO (e.g. 'zxx:en'), without running "
@@ -216,8 +231,15 @@ def _apply_cli_overrides(config: Config, args) -> None:
     Only values that were explicitly provided on the command line override
     the config-file / default values.  For boolean toggle pairs
     (e.g. ``--remux-to-mkv`` / ``--no-remux-to-mkv``) the "positive"
-    flag wins if both are given.
+    flag wins if both are given.  Re-applied after every config reload;
+    the one-shot flags are handled by :func:`_cli_one_shot_options`.
     """
+
+    # ── Logging ──────────────────────────────────────────────────────────
+    if args.verbose:
+        config.show_details = True
+    elif args.quiet:
+        config.show_details = False
 
     # ── Paths & general ──────────────────────────────────────────────────
     if args.directory:
@@ -276,22 +298,6 @@ def _apply_cli_overrides(config: Config, args) -> None:
     if args.reprocess_all:
         config.reprocess_all = True
 
-    if args.reprocess_language:
-        config.reprocess_language = args.reprocess_language.strip().lower()
-
-    if args.relabel_language:
-        src, sep, dst = args.relabel_language.partition(":")
-        if not sep or not src.strip() or not dst.strip():
-            raise SystemExit("--relabel-language expects FROM:TO, e.g. zxx:en")
-        config.relabel_language_from = normalize_language_code(src)
-        config.relabel_language_to = normalize_language_code(dst)
-
-    if args.force_reprocess:
-        config.force_reprocess = True
-
-    if args.index_languages:
-        config.index_languages_only = True
-
     # ── Tracking ─────────────────────────────────────────────────────────
     if args.no_tracking:
         config.use_tracking = False
@@ -347,6 +353,25 @@ def _apply_cli_overrides(config: Config, args) -> None:
 
     if args.forced_sub_max_count is not None:
         config.forced_subtitle_max_count_threshold = args.forced_sub_max_count
+
+
+def _cli_one_shot_options(args) -> dict:
+    """CLI flags that apply to the first run only (maintenance actions)."""
+    opts: dict = {}
+    if args.reprocess_language:
+        # Track tags are compared in normalised form ('eng' -> 'en').
+        opts["reprocess_language"] = normalize_language_code(args.reprocess_language)
+    if args.relabel_language:
+        src, sep, dst = args.relabel_language.partition(":")
+        if not sep or not src.strip() or not dst.strip():
+            raise SystemExit("--relabel-language expects FROM:TO, e.g. zxx:en")
+        opts["relabel_language_from"] = normalize_language_code(src)
+        opts["relabel_language_to"] = normalize_language_code(dst)
+    if args.force_reprocess:
+        opts["force_reprocess"] = True
+    if args.index_languages:
+        opts["index_languages_only"] = True
+    return opts
 
 
 def _build_run_summary(video_results: list, ext_sub_results: list,
@@ -520,6 +545,25 @@ def _try_reprocess_language_fast_path(detector, config: Config,
     return True
 
 
+def _run_reprocess_files(detector, config: Config,
+                         all_video_results: list) -> None:
+    """Reprocess the files picked in the Web UI's Reprocess Specific
+    Files action, without walking the libraries."""
+    from pathlib import Path
+
+    paths = [Path(p) for p in config.reprocess_files]
+    logger.info(
+        "Reprocess-files: %d selected file(s) — skipping full library scan",
+        len(paths),
+    )
+    print(
+        f"Reprocess-files: {len(paths)} selected file(s) — skipping full "
+        f"library scan",
+        flush=True,
+    )
+    all_video_results.extend(detector.process_files(paths))
+
+
 def _validate_dirs(config: Config, state) -> bool:
     """Check the configured library paths.
 
@@ -562,7 +606,7 @@ def _run_relabel(config: Config, state, start: float) -> None:
     try:
         result = relabel_audio_language(
             config, src, dst,
-            cancel_check=(state.is_stopped if state is not None else None),
+            cancel_check=(state.is_cancel_requested if state is not None else None),
         )
     except Exception as exc:
         msg = f"Changing language tag failed: {exc}"
@@ -606,22 +650,41 @@ def _run_relabel(config: Config, state, start: float) -> None:
         })
 
 
-def _run_processing(config: Config, skip_update_check: bool = False,
-                    state: "Optional[SchedulerState]" = None,
-                    config_path: str = "config/config.yml") -> None:
+def _run_processing(config_path: str = "config/config.yml",
+                    cli_args=None,
+                    skip_update_check: bool = False,
+                    state: "Optional[SchedulerState]" = None) -> None:
     start = time.time()
 
     if not skip_update_check:
         check_for_updates()
 
-    # Reload config from disk so web UI settings changes take effect
+    # Fresh settings every run: web UI edits take effect, command-line
+    # overrides are re-applied on top of the file, and nothing from a
+    # previous one-shot run can leak into this one.
+    config = Config()
     config.load_from_file(config_path)
-    config.reset_transient_options()
+    if cli_args is not None:
+        _apply_cli_overrides(config, cli_args)
+    # Show Details may have been toggled in the web UI since the last run.
+    _apply_console_level(config, cli_args)
     if state is not None:
         for key, val in state.consume_run_options().items():
             if hasattr(config, key):
                 setattr(config, key, val)
-                logger.info("One-shot run option applied: %s=%s", key, val)
+                shown = (f"{len(val)} item(s)" if isinstance(val, (list, tuple))
+                         else val)
+                logger.info("One-shot run option applied: %s=%s", key, shown)
+
+    if config.reprocess_language:
+        # Compared against normalised track tags ('eng' -> 'en').
+        config.reprocess_language = normalize_language_code(config.reprocess_language)
+
+    if config.reprocess_files:
+        # Selected files are reprocessed in full: every audio track, and
+        # every embedded subtitle track when Process Subtitles is on.
+        config.reprocess_all = True
+        config.reprocess_all_subtitles = True
 
     _tune_third_party_logging(config.show_details)
 
@@ -641,7 +704,7 @@ def _run_processing(config: Config, skip_update_check: bool = False,
                 include_non_mkv_video=bool(config.remux_to_mkv),
                 include_mp4=bool(config.mp4_support),
                 ignore_tags=list(config.ignore_tags or []),
-                cancel_check=(state.is_stopped if state is not None else None),
+                cancel_check=(state.is_cancel_requested if state is not None else None),
                 show_details=config.show_details,
                 ignore_tags_match_dirs=bool(config.ignore_tags_match_dirs),
             )
@@ -718,7 +781,7 @@ def _run_processing(config: Config, skip_update_check: bool = False,
             logger.info("Loading faster-whisper model: %s", config.whisper_model)
         else:
             print(f"Loading faster-whisper model: {config.whisper_model}")
-        cancel_check = state.is_stopped if state is not None else None
+        cancel_check = state.is_cancel_requested if state is not None else None
         detector = MKVLanguageDetector(config, cancel_check=cancel_check)
     except RuntimeError as exc:
         msg = f"Failed to initialise detector: {exc}"
@@ -740,16 +803,19 @@ def _run_processing(config: Config, skip_update_check: bool = False,
     all_ext_sub_results = []
     total_ext_subs_found = 0
     total_new_ext_subs = 0
+    fast_path_used = False
     try:
-        fast_path_used = False
-        if config.reprocess_language and hasattr(detector, "language_index"):
+        if config.reprocess_files:
+            _run_reprocess_files(detector, config, all_video_results)
+            fast_path_used = True
+        elif config.reprocess_language and hasattr(detector, "language_index"):
             fast_path_used = _try_reprocess_language_fast_path(
                 detector, config, all_video_results,
             )
 
         if not fast_path_used:
             for d in config.path:
-                if state is not None and state.is_stopped():
+                if state is not None and state.is_cancel_requested():
                     break
                 video_results, ext_sub_results, dir_ext_subs_found, dir_new_ext_subs = detector.process_directory(d)
                 all_video_results.extend(video_results)
@@ -770,10 +836,14 @@ def _run_processing(config: Config, skip_update_check: bool = False,
         if config.use_tracking and hasattr(detector, "tracker"):
             detector.tracker.save_if_dirty()
 
-    # Save failed files for the web UI
+    # Save failed files for the web UI.  Only a complete library run
+    # replaces the list; selected-files / by-language / cancelled runs
+    # update just the files they actually processed.
+    cancelled = state is not None and state.is_cancel_requested()
     if config.use_tracking and not config.dry_run:
         ProcessingTracker.save_failed_files_json(
-            "config", all_video_results, all_ext_sub_results)
+            "config", all_video_results, all_ext_sub_results,
+            replace=not (fast_path_used or cancelled))
 
     runtime = time.time() - start
     print_detailed_summary(all_video_results, all_ext_sub_results,
@@ -786,6 +856,9 @@ def _run_processing(config: Config, skip_update_check: bool = False,
         summary = _build_run_summary(all_video_results, all_ext_sub_results,
                                      runtime, total_new_ext_subs)
         summary["dry_run"] = bool(config.dry_run)
+        if config.reprocess_files:
+            summary["reprocess_files_run"] = True
+            summary["reprocess_files_count"] = len(config.reprocess_files)
         state.set_last_run_summary(summary)
 
 
@@ -826,31 +899,17 @@ def main() -> None:
     logger.info("Log file: %s", log_file)
 
     # ── Config ───────────────────────────────────────────────────────────
+    # Startup copy (log level, run_on_startup); every run builds its own.
     config = Config()
-    if args.verbose:
-        config.show_details = True
-    elif args.quiet:
-        config.show_details = False
-
     config.load_from_file(args.config)
     _apply_cli_overrides(config, args)
 
     # Adjust console log level after config is loaded
-    if config.show_details:
-        for h in logging.getLogger().handlers:
-            if hasattr(h, "stream") and getattr(h.stream, "_original", None):
-                h.setLevel(logging.DEBUG)
-            elif isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
-                h.setLevel(logging.DEBUG)
+    _apply_console_level(config, args)
 
     # ── Scheduler state (shared between main thread and web UI) ────────
     sched_state = SchedulerState(config_dir="config")
-    cli_one_shot: dict = {}
-    for _key, _default in Config.TRANSIENT_RUN_OPTIONS.items():
-        _current = getattr(config, _key)
-        if _current != _default:
-            cli_one_shot[_key] = _current
-            setattr(config, _key, _default)
+    cli_one_shot = _cli_one_shot_options(args)
     if cli_one_shot:
         sched_state.stash_run_options(cli_one_shot)
         logger.info("CLI one-shot flags forwarded to first run: %s",
@@ -880,18 +939,22 @@ def main() -> None:
         for k in ("CRON", "CRON_SCHEDULE", "SCHEDULE_HOURS")
     )
 
-    if _cfg_has_schedule or _env_has_schedule:
+    # A schedule in config.yml (written on the first scheduled start and by
+    # every Settings save) or in the env means scheduled mode; --once wins.
+    if not args.once and (_cfg_has_schedule or _env_has_schedule):
         _load_initial_schedule(sched_state, args.config)
         run_on_schedule(
-            lambda: _run_processing(config, skip_update_check=args.skip_update_check,
-                                    state=sched_state, config_path=args.config),
+            lambda: _run_processing(args.config, cli_args=args,
+                                    skip_update_check=args.skip_update_check,
+                                    state=sched_state),
             state=sched_state,
             run_on_startup=config.run_on_startup,
         )
         # run_on_schedule never returns
     else:
         sched_state.set_status("running")
-        _run_processing(config, skip_update_check=args.skip_update_check,
-                        state=sched_state, config_path=args.config)
+        _run_processing(args.config, cli_args=args,
+                        skip_update_check=args.skip_update_check,
+                        state=sched_state)
         if sched_state.status != "error":
             sched_state.set_status("idle")

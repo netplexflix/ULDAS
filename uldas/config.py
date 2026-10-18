@@ -1,27 +1,54 @@
 #file: uldas/config.py
 
 import os
+import stat
 import logging
+import tempfile
 import yaml
 
 logger = logging.getLogger(__name__)
 
 
+def write_config_yaml(config_path: str, data: dict, dumper=None) -> None:
+    """Write config.yml atomically (temp file + rename), so a run or the web
+    UI never reads a half-written file.  Keeps the existing file's mode and
+    owner.  Falls back to a direct write where the rename isn't possible,
+    e.g. config.yml bind-mounted into the container as a single file."""
+    config_dir = os.path.dirname(config_path) or "."
+    os.makedirs(config_dir, exist_ok=True)
+    kwargs = {"default_flow_style": False, "sort_keys": False}
+    if dumper is not None:
+        kwargs["Dumper"] = dumper
+    text = yaml.dump(data, **kwargs)
+
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=config_dir, prefix=".config_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if os.path.exists(config_path):
+            st = os.stat(config_path)
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            if hasattr(os, "chown"):
+                try:
+                    os.chown(tmp, st.st_uid, st.st_gid)
+                except OSError:
+                    pass
+        else:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, config_path)
+        return
+    except OSError:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    with open(config_path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
 class Config:
-
-    TRANSIENT_RUN_OPTIONS: dict = {
-        "index_languages_only": False,
-        "reprocess_language": "",
-        "relabel_language_from": "",
-        "relabel_language_to": "",
-        "force_reprocess": False,
-        "reprocess_all": False,
-        "reprocess_all_subtitles": False,
-    }
-
-    def reset_transient_options(self) -> None:
-        for key, default in self.TRANSIENT_RUN_OPTIONS.items():
-            setattr(self, key, default)
 
     def __init__(self):
         # ── Paths & general ──────────────────────────────────────────────
@@ -59,6 +86,7 @@ class Config:
         self.reprocess_language: str = ""
         self.relabel_language_from: str = ""
         self.relabel_language_to: str = ""
+        self.reprocess_files: "list[str] | tuple" = ()
         self.index_languages_only: bool = False
 
         # ── Subtitle processing ──────────────────────────────────────────

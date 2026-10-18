@@ -5,6 +5,7 @@ requests>=2.32.4
 packaging>=21.3
 psutil>=7.0.0
 langdetect>=1.0.8
+charset-normalizer>=2.0
 pytesseract>=0.3.13
 pillow>=11.3.0
 flask>=3.0.0

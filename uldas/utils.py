@@ -12,8 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 # ── CPU limits ───────────────────────────────────────────────────────────
+_cpu_limits_applied = False
+
+
 def setup_cpu_limits() -> None:
-    """Lower process priority and pin to 75 % of cores."""
+    """Lower process priority and pin to 75 % of cores.
+
+    Applied once per process: ``os.nice`` is relative, so repeating it on
+    every scheduled run would keep lowering the priority.
+    """
+    global _cpu_limits_applied
+    if _cpu_limits_applied:
+        return
+    _cpu_limits_applied = True
     try:
         proc = psutil.Process()
 
@@ -22,16 +33,35 @@ def setup_cpu_limits() -> None:
         elif hasattr(proc, "nice"):
             proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
 
-        cpu_count = psutil.cpu_count()
-        max_cores = max(1, int(cpu_count * 0.75))
-
         if hasattr(proc, "cpu_affinity"):
-            cores = list(range(min(max_cores, cpu_count)))
+            # 75 % of the cores this process may use — in a container
+            # pinned to e.g. cores 6-11 that is a subset of 6-11, not of
+            # the host's 0-N.
+            allowed = sorted(proc.cpu_affinity())
+            cores = allowed[:max(1, int(len(allowed) * 0.75))]
             proc.cpu_affinity(cores)
-            logger.info("Limited to %d of %d CPU cores", len(cores), cpu_count)
+            logger.info("Limited to %d of %d CPU cores", len(cores), len(allowed))
 
     except Exception as exc:
         logger.warning("Could not set CPU limits: %s", exc)
+
+
+def cgroup_cpu_quota() -> "float | None":
+    """CPU limit of the container (``docker --cpus 4`` → 4.0), or None."""
+    try:                                                    # cgroup v2
+        with open("/sys/fs/cgroup/cpu.max", encoding="ascii") as fh:
+            quota, period = fh.read().split()[:2]
+        return None if quota == "max" else int(quota) / int(period)
+    except (OSError, ValueError):
+        pass
+    try:                                                    # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", encoding="ascii") as fh:
+            quota = int(fh.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", encoding="ascii") as fh:
+            period = int(fh.read())
+        return quota / period if quota > 0 and period > 0 else None
+    except (OSError, ValueError):
+        return None
 
 
 def limit_subprocess_resources(cmd: list[str]) -> list[str]:
@@ -70,6 +100,14 @@ def convert_iso639_1_to_2(code: str) -> str:
     """Convert 2-letter → 3-letter code."""
     from uldas.constants import ISO639_1_TO_2
     return ISO639_1_TO_2.get(code.lower(), code)
+
+
+def mp4_language_code(code: str) -> str:
+    """3-letter code to write into an MP4 ``mdhd`` box: ISO 639-2/T, as the
+    ISO base media format specifies (``deu``, not ``ger``)."""
+    from uldas.constants import ISO639_2_B_TO_T
+    lang3 = convert_iso639_1_to_2(code.split("-")[0].lower())
+    return ISO639_2_B_TO_T.get(lang3, lang3)
 
 
 def get_language_name(language_code: str) -> str:

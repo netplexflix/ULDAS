@@ -6,6 +6,7 @@ import yaml
 from flask import render_template, jsonify, request
 
 import uldas.webui as webui
+from uldas.config import write_config_yaml
 from uldas.tracking import ProcessingTracker
 from uldas.constants import VERSION
 from uldas.updater import get_update_status
@@ -70,6 +71,54 @@ def _get_cached_tracker(config_dir: str) -> ProcessingTracker:
         _tracker_cache["config_dir"] = config_dir
         _tracker_cache["mtimes"] = current_mtimes
         return tracker
+
+
+# ── Language-index cache ─────────────────────────────────────────────────
+# language_index.json lists every file of the library (several MB), and the
+# dashboard asks for it on every load and tracker checkpoint.  Parse it once
+# per change and serve the dashboard a small summary.
+_index_cache_lock = threading.Lock()
+_index_cache: "dict[str, object]" = {"path": None, "mtime": None, "entry": None}
+
+
+def _get_cached_language_index(config_dir: str) -> "dict | None":
+    """``{"data": raw index, "summary": dashboard fields}``, or None when no
+    index has been built.  Reloaded only when the file changes."""
+    from uldas.language_index import INDEX_FILENAME, LanguageIndex
+
+    path = os.path.join(config_dir, INDEX_FILENAME)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    with _index_cache_lock:
+        if _index_cache["path"] == path and _index_cache["mtime"] == mtime:
+            return _index_cache["entry"]
+        idx = LanguageIndex(config_dir=config_dir, read_only=True)
+        with idx._lock:
+            idx._recompute_counts_locked()
+            data = idx._data            # read-only instance: no copy needed
+        per_file = data.get("per_file") or {}
+        per_ext = data.get("per_ext_sub") or {}
+        if not per_file and not per_ext and not data.get("indexed_at"):
+            entry = None                # empty skeleton: nothing indexed yet
+        else:
+            entry = {
+                "data": data,
+                "summary": {
+                    "indexed_at": data.get("indexed_at"),
+                    "directories": data.get("directories") or [],
+                    "counts": data.get("counts") or {},
+                    "video_files_indexed": len(per_file),
+                    "external_sub_files_indexed": len(per_ext),
+                },
+            }
+        _index_cache.update(path=path, mtime=mtime, entry=entry)
+        return entry
+
+
+# Upper bound on files a single Reprocess Specific Files run accepts.
+_REPROCESS_FILES_MAX = 1000
 
 
 class _QuotedDumper(yaml.SafeDumper):
@@ -269,7 +318,7 @@ CONFIG_OPTIONS = [
         "type": "int",
         "default": 0,
         "label": "CPU Threads",
-        "description": "Number of CPU threads to use. 0 = automatic detection based on system cores.",
+        "description": "Number of CPU threads Whisper uses on CPU. 0 = all cores ULDAS is allowed to use (75% of the system's cores).",
         "advanced": True,
     },
     {
@@ -510,7 +559,7 @@ def register_routes(app, scheduler_state=None):
         if scheduler_state is None:
             return jsonify({"status": "error",
                             "message": "No scheduler active (not in CRON mode)"}), 404
-        if scheduler_state.status == "running":
+        if scheduler_state.status in ("running", "stopping"):
             return jsonify({"status": "error",
                             "message": "A processing run is already in progress"}), 409
         scheduler_state.request_run()
@@ -521,7 +570,7 @@ def register_routes(app, scheduler_state=None):
         if scheduler_state is None:
             return jsonify({"status": "error",
                             "message": "No scheduler active (not in CRON mode)"}), 404
-        if scheduler_state.status == "running":
+        if scheduler_state.status in ("running", "stopping"):
             return jsonify({"status": "error",
                             "message": "A processing run is already in progress"}), 409
         scheduler_state.request_run(options={"index_languages_only": True})
@@ -533,7 +582,7 @@ def register_routes(app, scheduler_state=None):
         if scheduler_state is None:
             return jsonify({"status": "error",
                             "message": "No scheduler active (not in CRON mode)"}), 404
-        if scheduler_state.status == "running":
+        if scheduler_state.status in ("running", "stopping"):
             return jsonify({"status": "error",
                             "message": "A processing run is already in progress"}), 409
         body = request.get_json(silent=True) or {}
@@ -544,9 +593,54 @@ def register_routes(app, scheduler_state=None):
         if not code.replace("-", "").isalnum() or len(code) > 10:
             return jsonify({"status": "error",
                             "message": f"Invalid language code: {code}"}), 400
+        from uldas.utils import normalize_language_code
+        code = normalize_language_code(code)
         scheduler_state.request_run(options={"reprocess_language": code})
         return jsonify({"status": "ok",
                         "message": f"Reprocess run triggered for language '{code}'"})
+
+    @app.route("/api/scheduler/reprocess-files", methods=["POST"])
+    def scheduler_reprocess_files():
+        if scheduler_state is None:
+            return jsonify({"status": "error",
+                            "message": "No scheduler active (not in CRON mode)"}), 404
+        if scheduler_state.status in ("running", "stopping"):
+            return jsonify({"status": "error",
+                            "message": "A processing run is already in progress"}), 409
+        body = request.get_json(silent=True) or {}
+        files = body.get("files")
+        if not isinstance(files, list) or not files:
+            return jsonify({"status": "error",
+                            "message": "Missing 'files' list in request body"}), 400
+        if len(files) > _REPROCESS_FILES_MAX:
+            return jsonify({"status": "error",
+                            "message": (f"Too many files selected (max "
+                                        f"{_REPROCESS_FILES_MAX})")}), 400
+
+        # Only paths already in the processed cache are accepted, so the
+        # endpoint can't be pointed at arbitrary files on disk.
+        tracked = _get_cached_tracker(webui._config_dir).data
+        valid: list = []
+        seen: set = set()
+        unknown = 0
+        for path in files:
+            if not isinstance(path, str) or path not in tracked:
+                unknown += 1
+                continue
+            if path not in seen:
+                seen.add(path)
+                valid.append(path)
+        if not valid:
+            return jsonify({"status": "error",
+                            "message": "None of the selected files are in the processed cache"}), 400
+
+        scheduler_state.request_run(options={"reprocess_files": valid})
+        n = len(valid)
+        msg = f"Reprocess run triggered for {n} file{'' if n == 1 else 's'}"
+        if unknown:
+            msg += f" ({unknown} not in the processed cache, ignored)"
+        return jsonify({"status": "ok", "message": msg,
+                        "files": n, "unknown": unknown})
 
     @app.route("/api/scheduler/relabel-language", methods=["POST"])
     def scheduler_relabel_language():
@@ -556,7 +650,7 @@ def register_routes(app, scheduler_state=None):
         if scheduler_state is None:
             return jsonify({"status": "error",
                             "message": "No scheduler active (not in CRON mode)"}), 404
-        if scheduler_state.status == "running":
+        if scheduler_state.status in ("running", "stopping"):
             return jsonify({"status": "error",
                             "message": "A processing run is already in progress"}), 409
         body = request.get_json(silent=True) or {}
@@ -622,14 +716,9 @@ def register_routes(app, scheduler_state=None):
                 config = {}
         else:
             # Create config with defaults
-            config_dir = os.path.dirname(config_path)
-            if config_dir:
-                os.makedirs(config_dir, exist_ok=True)
             defaults = {opt["key"]: opt["default"] for opt in CONFIG_OPTIONS}
             try:
-                with open(config_path, "w", encoding="utf-8") as fh:
-                    yaml.dump(defaults, fh, Dumper=_QuotedDumper,
-                              default_flow_style=False, sort_keys=False)
+                write_config_yaml(config_path, defaults, dumper=_QuotedDumper)
             except Exception:
                 pass
             config = defaults
@@ -688,14 +777,8 @@ def register_routes(app, scheduler_state=None):
 
         existing.update(new_values)
 
-        config_dir = os.path.dirname(config_path)
-        if config_dir:
-            os.makedirs(config_dir, exist_ok=True)
-
         try:
-            with open(config_path, "w", encoding="utf-8") as fh:
-                yaml.dump(existing, fh, Dumper=_QuotedDumper,
-                          default_flow_style=False, sort_keys=False)
+            write_config_yaml(config_path, existing, dumper=_QuotedDumper)
         except Exception as exc:
             return jsonify({"status": "error", "message": str(exc)}), 500
 
@@ -752,9 +835,8 @@ def register_routes(app, scheduler_state=None):
 
     @app.route("/api/stats/languages")
     def get_languages():
-        from uldas.language_index import load_language_index
-
-        index = load_language_index(webui._config_dir)
+        cached = _get_cached_language_index(webui._config_dir)
+        index = cached["summary"] if cached else None
         if index and isinstance(index.get("counts"), dict):
             audio = index["counts"].get("audio") or {}
             items = [{"code": code, "name": _name_for(code),
@@ -792,18 +874,19 @@ def register_routes(app, scheduler_state=None):
 
     @app.route("/api/stats/language-index")
     def get_language_index():
-        """Return the full language-index document for the dashboard's
-        language-distribution chart. 404 when no index has been built.
+        """Summary of the language index for the dashboard's language chart
+        and Index Languages status (counts, not the per-file lists, which
+        /files serves on demand). 404 when no index has been built.
         """
-        from uldas.language_index import load_language_index
-        index = load_language_index(webui._config_dir)
-        if not index:
+        cached = _get_cached_language_index(webui._config_dir)
+        if not cached:
             return jsonify({"status": "missing"}), 404
+        index = dict(cached["summary"])
 
         # Attach a {code: name} map for every code present so the chart
         # can render "<code> - <name>" labels matching the dropdown style.
         names: dict = {}
-        counts = index.get("counts") if isinstance(index, dict) else None
+        counts = index.get("counts")
         if isinstance(counts, dict):
             for bucket in counts.values():
                 if isinstance(bucket, dict):
@@ -815,8 +898,6 @@ def register_routes(app, scheduler_state=None):
 
     @app.route("/api/stats/language-index/files")
     def get_language_index_files():
-        from uldas.language_index import load_language_index
-
         code = (request.args.get("code") or "").strip().lower()
         kind = (request.args.get("kind") or "audio").strip().lower()
         try:
@@ -833,9 +914,10 @@ def register_routes(app, scheduler_state=None):
                             "message": ("Invalid 'kind': must be audio, "
                                         "embedded_subs, or external_subs")}), 400
 
-        index = load_language_index(webui._config_dir)
-        if not index:
+        cached = _get_cached_language_index(webui._config_dir)
+        if not cached:
             return jsonify({"status": "missing"}), 404
+        index = cached["data"]
 
         matches: list = []
         total = 0
@@ -863,10 +945,46 @@ def register_routes(app, scheduler_state=None):
 
     # ── Cache maintenance API ─────────────────────────────────────────────
 
+    @app.route("/api/cache/search")
+    def search_cache():
+        """Find processed video files whose path contains every search term."""
+        terms = (request.args.get("q") or "").lower().split()
+        try:
+            limit = int(request.args.get("limit", "50"))
+        except ValueError:
+            limit = 50
+        limit = max(1, min(limit, 200))
+
+        if sum(len(t) for t in terms) < 2:
+            return jsonify({"results": [], "total": 0, "truncated": False})
+
+        tracker = _get_cached_tracker(webui._config_dir)
+        matches = sorted(
+            (path for path, entry in tracker.data.items()
+             if entry.get("type") != "external_subtitle"
+             and all(t in path.lower() for t in terms)),
+            key=str.lower,
+        )
+        results = [{"path": p,
+                    "filename": os.path.basename(p),
+                    "dir": os.path.dirname(p)} for p in matches[:limit]]
+        return jsonify({
+            "results": results,
+            "total": len(matches),
+            "truncated": len(matches) > limit,
+        })
+
     @app.route("/api/cache/prune-orphans", methods=["POST"])
     def prune_orphans():
         """Remove tracker entries whose path is no longer under any of the currently-configured library paths."""
         from uldas.tracking import ProcessingTracker
+
+        # A running detector holds its own copy of the tracker and would
+        # write the pruned entries back at its next checkpoint.
+        if (scheduler_state is not None
+                and scheduler_state.status in ("running", "stopping")):
+            return jsonify({"status": "error",
+                            "message": "A processing run is already in progress"}), 409
 
         # Read the live config.yml to discover the current library paths.
         config_path = webui._config_path
@@ -898,6 +1016,8 @@ def register_routes(app, scheduler_state=None):
         with _tracker_cache_lock:
             _tracker_cache["tracker"] = None
             _tracker_cache["mtimes"] = ()
+        with _index_cache_lock:
+            _index_cache["mtime"] = None
 
         total = (removed["videos"] + removed["ext_subs"] + removed["failed"]
                  + idx_removed["files"] + idx_removed["ext_subs"])
