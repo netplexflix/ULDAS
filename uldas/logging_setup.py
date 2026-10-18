@@ -10,6 +10,12 @@ from pathlib import Path
 MAX_LOG_FILES = 20
 LOG_DIR_NAME = "logs"
 
+# Set by setup_logging(); begin_run_log() swaps in a new file per run.
+_log_dir: "Path | None" = None
+_file_handler: "logging.FileHandler | None" = None
+_tee_streams: list = []
+_log_file_used = False
+
 
 class _SafeFileHandler(logging.FileHandler):
     def emit(self, record):
@@ -43,6 +49,13 @@ class _SafeStreamHandler(logging.StreamHandler):
             self.handleError(record)
 
 
+def set_console_level(level: int) -> None:
+    """Set the console handler's level (the log file always gets DEBUG)."""
+    for h in logging.getLogger().handlers:
+        if isinstance(h, _SafeStreamHandler):
+            h.setLevel(level)
+
+
 def _prune_old_logs(log_dir: Path, max_files: int = MAX_LOG_FILES) -> None:
     """Remove oldest log files if count exceeds *max_files*."""
     log_files = sorted(log_dir.glob("uldas_*.log"), key=lambda p: p.stat().st_mtime)
@@ -54,19 +67,60 @@ def _prune_old_logs(log_dir: Path, max_files: int = MAX_LOG_FILES) -> None:
             pass
 
 
+def _new_log_path(log_dir: Path) -> Path:
+    """A fresh ``uldas_<timestamp>.log`` path (suffixed if the second is taken)."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"uldas_{timestamp}.log"
+    n = 1
+    while log_file.exists():
+        log_file = log_dir / f"uldas_{timestamp}_{n}.log"
+        n += 1
+    return log_file
+
+
+def begin_run_log() -> "Path | None":
+    """Give each processing run its own log file.
+
+    The first run writes to the file setup_logging() opened at startup.
+    Every later run (scheduled mode keeps one process alive for months)
+    starts a new file, and old ones are pruned to MAX_LOG_FILES.
+    Returns the new file's path, or None when no new file was started.
+    """
+    global _file_handler, _log_file_used
+    if _file_handler is None:
+        return None
+    if not _log_file_used:
+        _log_file_used = True
+        return None
+
+    _prune_old_logs(_log_dir, MAX_LOG_FILES - 1)
+    log_file = _new_log_path(_log_dir)
+    handler = _SafeFileHandler(str(log_file), encoding="utf-8", errors="replace")
+    handler.setLevel(_file_handler.level)
+    handler.setFormatter(_file_handler.formatter)
+
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.removeHandler(_file_handler)
+    _file_handler.close()
+    _file_handler = handler
+    for tee in _tee_streams:
+        tee._log_path = log_file
+    return log_file
+
+
 def setup_logging(
     config_dir: str = "config",
     verbose: bool = False,
     quiet: bool = False,
 ) -> Path:
+    global _log_dir, _file_handler, _tee_streams, _log_file_used
     log_dir = Path(config_dir) / LOG_DIR_NAME
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"uldas_{timestamp}.log"
-
     # Prune old logs (keep MAX_LOG_FILES - 1 to make room for the new one)
     _prune_old_logs(log_dir, MAX_LOG_FILES - 1)
+    log_file = _new_log_path(log_dir)
 
     # ── Root logger ──────────────────────────────────────────────────────
     root = logging.getLogger()
@@ -74,6 +128,12 @@ def setup_logging(
 
     # Remove any pre-existing handlers (e.g. from basicConfig)
     root.handlers.clear()
+
+    # HTTP / download wire logging would otherwise flood the run logs at
+    # DEBUG (connection setup, headers) on every update check / model load.
+    for noisy in ("httpcore", "httpcore2", "httpx", "httpx2", "urllib3",
+                  "requests", "huggingface_hub", "filelock", "PIL", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
@@ -99,6 +159,10 @@ def setup_logging(
     sys.stdout = _TeeStream(sys.stdout, log_file)
     sys.stderr = _TeeStream(sys.stderr, log_file)
 
+    _log_dir = log_dir
+    _file_handler = fh
+    _tee_streams = [sys.stdout, sys.stderr]
+    _log_file_used = False
     return log_file
 
 

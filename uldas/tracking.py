@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 import time
 import logging
@@ -33,6 +34,60 @@ def _json_default(obj):
         type(obj).__name__, obj, coerced,
     )
     return coerced
+
+
+def _refresh_backup(path: Path) -> None:
+    """Make ``<file>.bak`` a copy of the current *path* without ever
+    removing *path* itself.
+
+    The file stays in place until the new version replaces it atomically,
+    so a crash or SIGTERM mid-save never leaves the tracker missing.  A
+    hard link costs nothing; filesystems without them get a copy.
+    """
+    if not path.exists():
+        return
+    backup = path.with_suffix(".json.bak")
+    staging = path.with_suffix(".json.bak.tmp")
+    try:
+        try:
+            if staging.exists():
+                staging.unlink()
+            os.link(path, staging)
+        except OSError:
+            shutil.copy2(path, staging)
+        os.replace(staging, backup)
+    except OSError as exc:
+        logger.debug("Could not refresh backup of %s: %s", path, exc)
+
+
+def _merge_track_details(old_details, new_details) -> list:
+    """Replace *old_details* entries per ``track_index`` with *new_details*."""
+    new_details = list(new_details or [])
+    new_idxs = {t["track_index"] for t in new_details}
+    merged = [t for t in (old_details or [])
+              if t.get("track_index") not in new_idxs]
+    merged.extend(new_details)
+    merged.sort(key=lambda t: t.get("track_index", 0))
+    return merged
+
+
+def _count_newly_labeled(details: list) -> int:
+    """Tracks given a real language that differs from their previous tag.
+
+    A re-detection that confirms the existing tag (``en`` → ``en``) is not
+    a new label, so it must not add to the lifetime totals.
+    """
+    from uldas.utils import normalize_language_code
+
+    count = 0
+    for t in details:
+        code = normalize_language_code(t.get("detected_language") or "")
+        if code in ("zxx", "und"):
+            continue
+        if code == normalize_language_code(t.get("previous_language") or ""):
+            continue
+        count += 1
+    return count
 
 
 class ProcessingTracker:
@@ -98,14 +153,7 @@ class ProcessingTracker:
                 os.unlink(tmp_path)
                 raise
 
-            # Keep a backup of the previous version
-            backup = self.tracker_file.with_suffix(".json.bak")
-            if self.tracker_file.exists():
-                try:
-                    os.replace(str(self.tracker_file), str(backup))
-                except OSError:
-                    pass
-
+            _refresh_backup(self.tracker_file)
             os.replace(tmp_path, str(self.tracker_file))
             self._dirty = False
         except (IOError, TypeError, ValueError) as exc:
@@ -156,13 +204,7 @@ class ProcessingTracker:
                 os.unlink(tmp_path)
                 raise
 
-            backup = self.ext_sub_file.with_suffix(".json.bak")
-            if self.ext_sub_file.exists():
-                try:
-                    os.replace(str(self.ext_sub_file), str(backup))
-                except OSError:
-                    pass
-
+            _refresh_backup(self.ext_sub_file)
             os.replace(tmp_path, str(self.ext_sub_file))
             self._ext_sub_dirty = False
         except (IOError, TypeError, ValueError) as exc:
@@ -302,6 +344,22 @@ class ProcessingTracker:
 
         return actionable, skipped, key_cache
 
+    def is_unchanged(self, key: str) -> bool:
+        """True if the file at *key* still has its tracked size and mtime.
+
+        A file replaced at the same path (an upgrade keeping the filename,
+        an in-place re-encode) returns False so it gets processed again.
+        """
+        entry = self.data.get(key)
+        if not entry:
+            return False
+        try:
+            stat = os.stat(key)
+        except OSError:
+            return False
+        return (entry.get("size") == stat.st_size
+                and abs(entry.get("mtime", 0) - stat.st_mtime) <= 1)
+
     def get_entry(self, file_path: Path, key: str = None) -> dict:
         """Return the tracker entry without any filesystem I/O."""
         if key is None:
@@ -349,6 +407,84 @@ class ProcessingTracker:
             entry["original_format"] = original_format
         self.data[key] = entry
         self._dirty = True
+
+    def merge_audio_relabel(
+        self,
+        file_path: Path,
+        new_details: list,
+        audio_ok: bool = True,
+        key: str = None,
+        add_flags: tuple = (),
+        subtitle_details: list = None,
+        subtitle_ok: bool = None,
+    ) -> None:
+        """Merge re-detected or relabeled tracks into an existing entry.
+
+        Used by reprocess-by-language, reprocess-specific-files and the
+        change-language-tag action.  Track details are replaced per track
+        index, the derived flags (silent_content / inconclusive /
+        no_action_required) are recomputed, and lifetime label counts are
+        preserved.  Subtitle details are merged the same way when
+        *subtitle_details* is given.  The file is re-stat'ed, so an
+        in-place tag edit doesn't look like a changed file on the next run.
+        """
+        existing = self.get_entry(file_path, key=key) or {}
+
+        merged_details = _merge_track_details(existing.get("track_details"),
+                                              new_details)
+        new_details = list(new_details or [])
+
+        prior_flags = list(existing.get("flags") or [])
+        derived = ("silent_content", "inconclusive", "relabeled",
+                   "no_action_required")
+        flags = [f for f in prior_flags if f not in derived]
+        for flag in add_flags:
+            if flag not in flags:
+                flags.append(flag)
+        if any(t.get("detected_language") == "zxx" for t in merged_details):
+            flags.append("silent_content")
+        if any(t.get("inconclusive") for t in merged_details):
+            flags.append("inconclusive")
+        # A later re-detection replaces a relabeled track's detail, so the
+        # flag only stays while some track still carries the relabel.
+        if any(t.get("relabeled") for t in merged_details):
+            flags.append("relabeled")
+
+        # Preserve prior counts: relabels do not add to the lifetime total.
+        audio_count = int(existing.get("audio_tracks_labeled", 0))
+        if audio_count == 0 and "audio_labeled" not in prior_flags and new_details:
+            audio_count = _count_newly_labeled(new_details)
+            if audio_count and "audio_labeled" not in flags:
+                flags.append("audio_labeled")
+
+        subtitle_processed = bool(existing.get("subtitle_processed", False))
+        subtitle_count = int(existing.get("subtitle_tracks_labeled", 0))
+        merged_sub_details = existing.get("subtitle_details")
+        if subtitle_details is not None:
+            subtitle_details = list(subtitle_details)
+            merged_sub_details = _merge_track_details(merged_sub_details,
+                                                      subtitle_details)
+            subtitle_processed = subtitle_processed or bool(subtitle_ok)
+            if (subtitle_count == 0 and "subtitle_labeled" not in prior_flags
+                    and subtitle_details):
+                subtitle_count = _count_newly_labeled(subtitle_details)
+                if subtitle_count and "subtitle_labeled" not in flags:
+                    flags.append("subtitle_labeled")
+        if not flags:
+            flags.append("no_action_required")
+
+        self.mark_processed(
+            file_path,
+            bool(existing.get("audio_processed", False)) or audio_ok,
+            subtitle_processed,
+            key=key,
+            flags=flags,
+            audio_tracks_labeled=audio_count,
+            subtitle_tracks_labeled=subtitle_count,
+            track_details=merged_details or None,
+            subtitle_details=merged_sub_details or None,
+            original_format=existing.get("original_format"),
+        )
 
     # ── External subtitle tracking ───────────────────────────────────────
     def is_external_subtitle_tracked(self, subtitle_path: Path) -> bool:
@@ -401,6 +537,31 @@ class ProcessingTracker:
         }
         self._ext_sub_dirty = True
 
+    def mark_external_subtitle_skipped(self, subtitle_path: Path,
+                                       reason: str) -> None:
+        """Track an external subtitle whose language couldn't be determined.
+
+        Detection is deterministic, so an unchanged file gives the same
+        answer next run: it is skipped until its size or mtime changes (or
+        subtitles are reprocessed).  Flagged 'inconclusive', not labeled.
+        """
+        key = os.path.abspath(str(subtitle_path))
+        try:
+            stat = subtitle_path.stat()
+        except OSError:
+            return
+        self.ext_sub_data[key] = {
+            "type": "external_subtitle",
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "language_code": None,
+            "reason": reason,
+            "processed_date": time.time(),
+            "filename": subtitle_path.name,
+            "flags": ["inconclusive"],
+        }
+        self._ext_sub_dirty = True
+
     def mark_external_subtitle_processed(
         self,
         subtitle_path: Path,
@@ -437,25 +598,37 @@ class ProcessingTracker:
         seen_paths: "Optional[set[str]]" = None,
         on_remove_video: "Optional[Callable[[str], None]]" = None,
         on_remove_ext_sub: "Optional[Callable[[str], None]]" = None,
+        extensions: "Optional[set[str]]" = None,
     ) -> int:
         """Remove entries for files that no longer exist on disk.
 
         If *directory* is given, only entries under that directory are
         checked — this avoids accidentally pruning entries on drives
-        that happen to be offline.
+        that happen to be offline (or in a sibling library such as
+        ``Movies 4K`` next to ``Movies``).
 
         If *seen_paths* is provided, it is taken as the authoritative
         set of absolute paths present on disk in *directory* (as
         collected during a recent ``os.walk``).  Tracker entries whose
         keys are absent from this set are pruned without any extra
         filesystem calls — much faster than ``os.path.exists`` per key.
+        *extensions* (lower-case, with the dot) limits that to the file
+        types the scan looked for: a file the current settings don't
+        scan is absent from *seen_paths* without being missing.
         """
-        prefix = os.path.abspath(directory) if directory else None
+        prefix = None
+        if directory:
+            prefix = os.path.abspath(directory)
+            if not prefix.endswith(os.sep):
+                prefix += os.sep
 
         def _missing(key: str) -> bool:
             if prefix and not key.startswith(prefix):
                 return False
             if seen_paths is not None:
+                if (extensions is not None
+                        and os.path.splitext(key)[1].lower() not in extensions):
+                    return False
                 return key not in seen_paths
             return not os.path.exists(key)
 
@@ -775,6 +948,13 @@ class ProcessingTracker:
             if "filename" not in entry:
                 entry["filename"] = Path(key).name
                 migrated = True
+            # Migration: a 'relabeled' flag outlived its track detail
+            # before the flag was derived from the details.
+            if ("relabeled" in entry["flags"] and not any(
+                    t.get("relabeled") for t in entry.get("track_details") or [])):
+                entry["flags"] = ([f for f in entry["flags"] if f != "relabeled"]
+                                  or ["no_action_required"])
+                migrated = True
 
             entries.append({
                 "filepath": key,
@@ -838,9 +1018,28 @@ class ProcessingTracker:
         config_dir: str,
         video_results: list,
         ext_sub_results: list,
+        replace: bool = True,
     ) -> None:
-        """Save failed files from processing results. Overwrites each run."""
+        """Save failed files from processing results.
+
+        With *replace* (a complete library run) the list is rebuilt from
+        this run.  Otherwise (selected files, a cancelled run) only the
+        entries of files processed in this run are updated.
+        """
         failed: Dict = {}
+        failed_path = Path(config_dir) / "failed_files.json"
+        if not replace and failed_path.exists():
+            try:
+                with open(failed_path, "r", encoding="utf-8") as fh:
+                    existing = json.load(fh)
+                touched = {r.get("original_file") for r in video_results
+                           if not r.get("skipped_due_to_tracking")}
+                touched |= {e.get("original_file") for e in ext_sub_results}
+                if isinstance(existing, dict):
+                    failed = {k: v for k, v in existing.items()
+                              if k not in touched}
+            except (json.JSONDecodeError, IOError):
+                failed = {}
         for r in video_results:
             if r.get("skipped_due_to_tracking"):
                 continue
@@ -862,7 +1061,6 @@ class ProcessingTracker:
                     "errors": [esr.get("reason", "Unknown error")],
                 }
 
-        failed_path = Path(config_dir) / "failed_files.json"
         try:
             Path(config_dir).mkdir(exist_ok=True)
             with open(failed_path, "w", encoding="utf-8") as fh:

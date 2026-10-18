@@ -7,12 +7,12 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=America/New_York # Set your timezone
-      # CRON schedule (optional). Runs on container start + on schedule.
+      # Initial CRON schedule; after the first start it is saved to config.yml
+      # and edited in the web UI (Settings > Scheduler).
       # Examples:
       #   "0 3 * * *"    = every day at 3:00 AM
       #   "0 */6 * * *"  = every 6 hours
       #   "0 5 * * 5"   = every Friday at 5:00 AM
-      # Leave empty or remove to run once and exit.
       - CRON_SCHEDULE=0 5 * * 5
     ports:
       - "2119:2119"
@@ -33,4 +33,4 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
-    restart: unless-stopped
+    restart: unless-stopped  # use "no" together with `command: --once` for a single run

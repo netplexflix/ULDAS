@@ -2,6 +2,7 @@
 
 import gc
 import json
+import math
 import os
 import subprocess
 import sys
@@ -16,15 +17,16 @@ from faster_whisper import WhisperModel
 from uldas.config import Config
 from uldas.constants import (
     LANGUAGE_CODES, EXTERNAL_SUBTITLE_EXTENSIONS, MP4_EXTENSIONS,
-    scan_video_extensions,
+    DISC_STRUCTURE_DIRS, in_disc_structure, scan_video_extensions,
 )
 from uldas.tracking import ProcessingTracker
 from uldas.tools import find_executable
 from uldas.utils import (
+    cgroup_cpu_quota,
     setup_cpu_limits,
     limit_subprocess_resources,
     normalize_language_code,
-    convert_iso639_1_to_2,
+    mp4_language_code,
 )
 from uldas import audio as audio_mod
 from uldas import subtitles as sub_mod
@@ -32,6 +34,80 @@ from uldas import external_subtitles as ext_sub_mod
 from uldas import mp4 as mp4_mod
 
 logger = logging.getLogger(__name__)
+
+# ── Remux stream handling (ffprobe codec names) ──────────────────────────
+_TS_SUFFIXES = (".m2ts", ".mts", ".ts")
+# In-progress remux output; renamed to .mkv once verified.  Never scanned.
+PARTIAL_SUFFIX = ".uldas-partial"
+# Subtitle codecs Matroska stores as-is.
+_MKV_COPY_SUBS = {
+    "subrip", "srt", "ass", "ssa", "webvtt", "text",
+    "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle",
+}
+# Text subtitles Matroska can't hold natively; converted to SRT.
+_MKV_SRT_SUBS = {"mov_text"}
+# Disc PCM flavours Matroska can't hold; converted losslessly to FLAC.
+_MKV_FLAC_AUDIO = {"pcm_bluray", "pcm_dvd"}
+
+
+def _available_cpu_count() -> int:
+    """Cores this process may run on (after ``setup_cpu_limits``), capped
+    at the container's CPU quota so threads aren't throttled."""
+    try:
+        count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        try:
+            import psutil
+            count = len(psutil.Process().cpu_affinity())
+        except Exception:
+            count = os.cpu_count() or 4
+    quota = cgroup_cpu_quota()
+    if quota:
+        count = min(count, math.ceil(quota))
+    return max(1, count)
+
+
+def _cuda_device_name(index: int = 0) -> Optional[str]:
+    """Name of CUDA device *index* (e.g. "NVIDIA GeForce RTX 2060"), or
+    None if it can't be read.  Asks the CUDA driver CTranslate2 itself
+    uses, so numbering matches it (CUDA_VISIBLE_DEVICES included)."""
+    try:
+        import ctypes
+        lib = (ctypes.WinDLL("nvcuda.dll") if sys.platform == "win32"
+               else ctypes.CDLL("libcuda.so.1"))
+        dev = ctypes.c_int()
+        name = ctypes.create_string_buffer(256)
+        if (lib.cuInit(0) or lib.cuDeviceGet(ctypes.byref(dev), index)
+                or lib.cuDeviceGetName(name, len(name), dev)):
+            return None
+        return name.value.decode(errors="replace").strip() or None
+    except Exception:
+        return None
+
+
+def _unlink_quiet(path: Optional[Path]) -> None:
+    try:
+        if path is not None and path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _audio_track_details(results: Dict) -> list:
+    """Tracker ``track_details`` for one processed file: labeled tracks
+    plus inconclusive ones (kept as 'und' / their previous tag)."""
+    details = list(results["processed_tracks"])
+    details += [
+        {
+            "track_index": t["track_index"],
+            "detected_language": "und",
+            "previous_language": t["previous_language"],
+            "inconclusive": True,
+        }
+        for t in results.get("inconclusive_tracks", [])
+    ]
+    details.sort(key=lambda t: t["track_index"])
+    return details
 
 
 def _flush_all_logs() -> None:
@@ -56,9 +132,9 @@ class MKVLanguageDetector:
         setup_cpu_limits()
         self.config = config
         self.deletion_failures: list[dict] = []
+        self.last_remux_error: Optional[str] = None
         self._cancel_check = cancel_check
         self._cancel_logged = False
-        self._reprocess_lang_force_all_audio = False
 
         # Per-file metadata caches, cleared at the start of each
         # process_file() call.  ffprobe/mkvmerge are expensive enough
@@ -67,6 +143,7 @@ class MKVLanguageDetector:
         self._mkv_info_cache: Dict[str, Dict] = {}
         self._duration_cache: Dict[str, float] = {}
         self._format_lang_cache: Dict[str, Dict[int, str]] = {}
+        self._speech_cache: Dict[str, Optional[List[Tuple[float, float]]]] = {}
 
         # ── Tracking ─────────────────────────────────────────────────────
         if config.use_tracking:
@@ -106,11 +183,15 @@ class MKVLanguageDetector:
         # ── Device / compute ─────────────────────────────────────────────
         device = self._determine_device()
         compute_type = self._determine_compute_type(device)
-        cpu_threads = config.cpu_threads if config.cpu_threads > 0 else 0
+        # faster-whisper treats 0 as "4 threads", not "all cores".
+        cpu_threads = (config.cpu_threads if config.cpu_threads > 0
+                       else _available_cpu_count())
+        self._cpu_threads = cpu_threads
 
         if config.show_details:
-            logger.info("Initializing faster-whisper: device=%s, compute=%s, model=%s",
-                        device, compute_type, config.whisper_model)
+            logger.info("Initializing faster-whisper: device=%s, compute=%s, "
+                        "model=%s, cpu_threads=%d",
+                        device, compute_type, config.whisper_model, cpu_threads)
 
         # ── Whisper model ────────────────────────────────────────────────
         self.whisper_model = self._init_whisper(device, compute_type, cpu_threads)
@@ -175,23 +256,42 @@ class MKVLanguageDetector:
             stop.set()
 
     def _load_whisper(self, device, compute_type, cpu_threads):
-        try:
-            model = WhisperModel(
-                self.config.whisper_model,
-                device=device,
-                compute_type=compute_type,
-                cpu_threads=cpu_threads,
-                download_root=None,
-                local_files_only=False,
-            )
+        # Requested setup first; on a GPU failure try CUDA int8 (works on
+        # cards without float16 support) before falling back to CPU int8.
+        attempts = [(device, compute_type)]
+        if device == "cuda" and compute_type != "int8":
+            attempts.append(("cuda", "int8"))
+        if (device, compute_type) != ("cpu", "int8"):
+            attempts.append(("cpu", "int8"))
+
+        last_exc = None
+        for n, (dev, ct) in enumerate(attempts):
+            if n:
+                logger.warning("Whisper init on %s/%s failed (%s) – trying %s/%s",
+                               *attempts[n - 1], last_exc, dev, ct)
+            try:
+                model = WhisperModel(
+                    self.config.whisper_model,
+                    device=dev,
+                    compute_type=ct,
+                    cpu_threads=cpu_threads,
+                    download_root=None,
+                    local_files_only=False,
+                )
+            except Exception as exc:
+                last_exc = exc
+                continue
+            msg = f"Whisper model '{self.config.whisper_model}' running on {dev} ({ct})"
+            if dev == "cuda":
+                gpu = _cuda_device_name()
+                if gpu:
+                    msg += f" – {gpu}"
             if self.config.show_details:
-                logger.info("✓ WhisperModel initialised successfully")
+                logger.info(msg)
+            else:
+                print(msg, flush=True)
             return model
-        except Exception as exc:
-            logger.warning("Primary init failed (%s), falling back to CPU", exc)
-            model = WhisperModel(self.config.whisper_model, device="cpu")
-            logger.info("✓ Fallback (CPU) initialisation successful")
-            return model
+        raise last_exc
 
     def _find_stub_model_cache(self) -> Optional[Path]:
         """Return the Hugging Face cache dir of the configured model if its
@@ -269,7 +369,19 @@ class MKVLanguageDetector:
     def _determine_compute_type(self, device):
         if self.config.compute_type != "auto":
             return self.config.compute_type
-        return "float16" if device == "cuda" else "int8"
+        if device != "cuda":
+            return "int8"
+        # float16 needs compute capability >= 7.0; Pascal cards (GTX 10xx,
+        # Quadro P-series) reject it but run int8 fine.
+        try:
+            import ctranslate2
+            supported = ctranslate2.get_supported_compute_types("cuda")
+            for ct in ("float16", "int8_float16", "int8", "float32"):
+                if ct in supported:
+                    return ct
+        except Exception:
+            pass
+        return "float16"
 
     # ── Unified directory scan ───────────────────────────────────────────
     def _scan_tree(self, directory: str) -> tuple[list[Path], list[Path], int, int, int, int]:
@@ -340,17 +452,28 @@ class MKVLanguageDetector:
         else:
             print(f"Scanning directory tree: {directory}", flush=True)
 
+        # os.walk silently skips directories it can't list; record that so
+        # the files under them aren't mistaken for deleted ones.
+        walk_errors: list = []
+
+        def _walk_error(exc: OSError) -> None:
+            walk_errors.append(exc)
+            logger.warning("Could not list %s: %s",
+                           getattr(exc, "filename", "?"), exc)
+
         try:
-            for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
+            for dirpath, dirnames, filenames in os.walk(
+                    directory, followlinks=False, onerror=_walk_error):
                 dirs_scanned += 1
 
-                # Prune ignored directories in place so os.walk never
-                # descends into them.
-                if match_dirs:
-                    keep = [d for d in dirnames
-                            if not any(tag in d.lower() for tag in tags_lower)]
-                    dirs_skipped += len(dirnames) - len(keep)
-                    dirnames[:] = keep
+                # Prune ignored directories (and Blu-ray / DVD folder
+                # structures) in place so os.walk never descends into them.
+                keep = [d for d in dirnames
+                        if d.lower() not in DISC_STRUCTURE_DIRS
+                        and not (match_dirs
+                                 and any(tag in d.lower() for tag in tags_lower))]
+                dirs_skipped += len(dirnames) - len(keep)
+                dirnames[:] = keep
 
                 for filename in filenames:
                     dot_pos = filename.rfind(".")
@@ -377,12 +500,27 @@ class MKVLanguageDetector:
                     seen_paths.add(abs_path_str)
 
                     if is_video:
-                        if use_fast_skip_video and abs_path_str in tracked_video_keys:
+                        if (use_fast_skip_video
+                                and abs_path_str in tracked_video_keys
+                                and self.tracker.is_unchanged(abs_path_str)):
                             video_skipped += 1
                             continue
+                        # New, or replaced since it was tracked: the batch
+                        # check drops the stale entry and requeues it.
                         video_files.append(Path(full_path_str))
                     else:  # is_sub
                         sub_path = Path(full_path_str)
+                        if (use_fast_skip_sub
+                                and abs_path_str in self.tracker.ext_sub_data
+                                and ext_sub_mod.get_language_tag(sub_path) is not None):
+                            # Tracked and tagged: skipped whether or not it
+                            # changed, so don't spend a stat() finding out.
+                            sub_skipped += 1
+                            continue
+                        if ext == ".sub" and ext_sub_mod.is_vobsub_data(sub_path):
+                            # Binary half of a VobSub pair: handled (and
+                            # renamed) together with its .idx.
+                            continue
                         if use_fast_skip_sub and self.tracker.is_external_subtitle_tracked(sub_path):
                             sub_skipped += 1
                             continue
@@ -415,10 +553,11 @@ class MKVLanguageDetector:
                         len(sub_files) + new_already_labeled, sub_skipped,
                     )
 
-        except PermissionError as exc:
-            logger.warning("Permission denied during scan: %s", exc)
         except Exception as exc:
             logger.error("Error during directory scan: %s", exc)
+            scan_complete = False
+        else:
+            scan_complete = not walk_errors
 
         # Flush tracked no_action_required entries (only on dirty; batched)
         if use_tracking and not self.config.dry_run:
@@ -426,8 +565,11 @@ class MKVLanguageDetector:
         if not self.config.dry_run and hasattr(self, "language_index"):
             self.language_index.save_if_dirty()
 
-        # Stash the seen-set so prune_missing_files can skip redundant I/O.
+        # Stash the seen-set (and which file types it covers) so
+        # prune_missing_files can skip redundant I/O.
         self._last_scan_seen_paths = seen_paths
+        self._last_scan_exts = set(video_exts) | (set(sub_exts) if scan_subs else set())
+        self._last_scan_complete = scan_complete
 
         if self.config.show_details:
             logger.info(
@@ -459,45 +601,108 @@ class MKVLanguageDetector:
 
     # ── Remux ────────────────────────────────────────────────────────────
     def remux_to_mkv(self, file_path: Path) -> Optional[Path]:
+        """Remux *file_path* to an MKV next to it and delete the original.
+
+        Returns the MKV path, or ``None`` on failure with the reason in
+        ``self.last_remux_error``.  The original is only deleted once the
+        MKV holds every audio and subtitle stream that was mapped; streams
+        are never dropped to make a remux succeed.
+        """
+        self.last_remux_error = None
         if file_path.suffix.lower() == ".mkv":
             return file_path
+        if in_disc_structure(file_path):
+            # A piece of a Blu-ray / DVD folder rip, not a standalone video.
+            self.last_remux_error = "part of a Blu-ray/DVD folder structure"
+            logger.warning("Not remuxing %s: %s", file_path, self.last_remux_error)
+            return None
         mkv_path = file_path.with_suffix(".mkv")
         if mkv_path.exists():
-            return mkv_path
+            # Never touch an MKV we didn't just create.
+            self.last_remux_error = (
+                f"{mkv_path.name} already exists – not overwriting it; if one "
+                f"of the two copies is incomplete, remove that one")
+            logger.warning("Not remuxing %s: %s", file_path.name,
+                           self.last_remux_error)
+            return None
+
+        plan = self._plan_remux(file_path)
+        if plan is None:
+            self.last_remux_error = "could not read the source streams"
+            logger.error("Not remuxing %s: %s", file_path.name,
+                         self.last_remux_error)
+            return None
+        if plan["unsupported_subs"]:
+            self.last_remux_error = (
+                "subtitle codec(s) MKV can't store: "
+                + ", ".join(sorted(set(plan["unsupported_subs"]))))
+            logger.error("Not remuxing %s: %s", file_path.name,
+                         self.last_remux_error)
+            return None
+
         if self.config.dry_run:
             print(f"[DRY RUN] Would remux {file_path.name} → {mkv_path.name}")
             return mkv_path
 
+        # ffmpeg writes to a name the scan never picks up; only a verified
+        # result is renamed to .mkv.  An interrupted remux (docker stop,
+        # crash, power cut) therefore never leaves a half-written MKV.
+        partial = mkv_path.with_name(mkv_path.name + PARTIAL_SUFFIX)
+        _unlink_quiet(partial)          # leftover of an interrupted attempt
         try:
             print(f"Remuxing {file_path.name} to MKV…")
-            strategies = self._build_remux_strategies(file_path, mkv_path)
-            for strat in strategies:
+            for strat in self._build_remux_strategies(file_path, partial, plan):
                 try:
                     limited = limit_subprocess_resources(strat["args"])
                     subprocess.run(limited, check=True, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace")
-                    if mkv_path.exists() and mkv_path.stat().st_size > 10_000:
-                        verify = [self.ffprobe, "-v", "quiet", "-print_format", "json",
-                                  "-show_streams", str(mkv_path)]
-                        vr = subprocess.run(verify, check=True, capture_output=True,
-                                            text=True, encoding="utf-8", errors="replace")
-                        json.loads(vr.stdout)
-                        if self.config.show_details:
-                            logger.info("Remuxed with strategy '%s'", strat["name"])
-                        else:
-                            print(f"Successfully remuxed to: {mkv_path.name}")
-                        self._remove_original(file_path, mkv_path)
-                        return mkv_path
-                except (subprocess.CalledProcessError, json.JSONDecodeError):
-                    if mkv_path.exists():
-                        mkv_path.unlink()
+                except subprocess.CalledProcessError as exc:
+                    logger.debug("Remux strategy '%s' failed for %s: %s",
+                                 strat["name"], file_path.name,
+                                 (exc.stderr or "").strip()[-500:])
+                    _unlink_quiet(partial)
+                    continue
+
+                counts = self._stream_counts(partial)
+                if (counts is None or not partial.exists()
+                        or partial.stat().st_size <= 10_000):
+                    _unlink_quiet(partial)
+                    continue
+                if counts != plan["expected"]:
+                    logger.warning(
+                        "Remux strategy '%s' for %s produced %d audio / %d "
+                        "subtitle stream(s), expected %d / %d – discarding",
+                        strat["name"], file_path.name,
+                        counts["audio"], counts["subtitle"],
+                        plan["expected"]["audio"], plan["expected"]["subtitle"],
+                    )
+                    _unlink_quiet(partial)
+                    continue
+
+                if mkv_path.exists():
+                    self.last_remux_error = (f"{mkv_path.name} appeared during "
+                                             f"the remux – not overwriting it")
+                    logger.warning("Not remuxing %s: %s", file_path.name,
+                                   self.last_remux_error)
+                    return None
+                os.replace(partial, mkv_path)
+                if self.config.show_details:
+                    logger.info("Remuxed with strategy '%s'", strat["name"])
+                else:
+                    print(f"Successfully remuxed to: {mkv_path.name}")
+                self._remove_original(file_path, mkv_path)
+                return mkv_path
+
+            self.last_remux_error = "all remux strategies failed"
             logger.error("All remux strategies failed for %s", file_path)
             return None
         except Exception as exc:
+            self.last_remux_error = str(exc)
             logger.error("Unexpected remux error: %s", exc)
-            if mkv_path.exists():
-                mkv_path.unlink()
             return None
+        finally:
+            # Also runs on SystemExit (SIGTERM) and KeyboardInterrupt.
+            _unlink_quiet(partial)
 
     def _remove_original(self, original: Path, mkv: Path):
         try:
@@ -522,89 +727,115 @@ class MKVLanguageDetector:
             })
             logger.warning("Could not remove original %s: %s", original, exc)
 
-    def _build_remux_strategies(self, src: Path, dst: Path) -> list[dict]:
-        """Return a list of ffmpeg remux strategies to try in order."""
+    @staticmethod
+    def _remux_probe_args(src: Path) -> list[str]:
+        """Input probing options, shared by the stream probe and the remux
+        itself so both see the same streams at the same indices."""
+        if src.suffix.lower() in _TS_SUFFIXES:
+            return ["-analyzeduration", "100M", "-probesize", "100M"]
+        return []
+
+    def _plan_remux(self, src: Path) -> Optional[dict]:
+        """Work out which streams go into the MKV and how.
+
+        Returns ``None`` if the source can't be probed.  ``expected`` holds
+        the audio / subtitle stream counts the MKV must end up with;
+        ``unsupported_subs`` lists subtitle codecs Matroska can't hold.
+        """
         try:
-            ar = subprocess.run(
-                [self.ffprobe, "-v", "quiet", "-print_format", "json",
-                 "-show_streams", str(src)],
+            r = subprocess.run(
+                [self.ffprobe, "-v", "quiet", *self._remux_probe_args(src),
+                 "-print_format", "json", "-show_streams", str(src)],
                 check=True, capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
             )
-            streams = json.loads(ar.stdout).get("streams", [])
+            streams = json.loads(r.stdout).get("streams", [])
         except Exception:
-            streams = []
+            return None
 
-        is_m2ts = src.suffix.lower() in (".m2ts", ".mts", ".ts")
-        has_pcm = any(s.get("codec_name") == "pcm_bluray"
-                      for s in streams if s.get("codec_type") == "audio")
-
-        map_args: list[str] = []
-        supported_sub = {
-            "subrip", "srt", "ass", "ssa", "webvtt", "mov_text",
-            "pgs", "dvdsub", "dvbsub", "hdmv_pgs_subtitle",
-        }
-        for i, s in enumerate(streams):
+        maps: list[str] = []
+        codecs: list[str] = []
+        unsupported: list[str] = []
+        n_audio = n_subs = 0
+        for s in streams:
             ct = s.get("codec_type", "")
-            cn = s.get("codec_name", "").lower()
-            if ct in ("video", "audio"):
-                map_args += ["-map", f"0:{i}"]
-            elif ct == "subtitle" and cn in supported_sub:
-                map_args += ["-map", f"0:{i}"]
-        if not map_args:
-            map_args = ["-map", "0:v", "-map", "0:a"]
+            cn = (s.get("codec_name") or "").lower()
+            spec = f"0:{s.get('index', 0)}"
+            if ct == "video":
+                maps += ["-map", spec]
+            elif ct == "audio":
+                maps += ["-map", spec]
+                if cn in _MKV_FLAC_AUDIO:
+                    codecs += [f"-c:a:{n_audio}", "flac"]
+                n_audio += 1
+            elif ct == "subtitle":
+                if cn in _MKV_SRT_SUBS:
+                    maps += ["-map", spec]
+                    codecs += [f"-c:s:{n_subs}", "srt"]
+                    n_subs += 1
+                elif cn in _MKV_COPY_SUBS:
+                    maps += ["-map", spec]
+                    n_subs += 1
+                else:
+                    unsupported.append(cn or "unknown")
+        if not maps:
+            return None
+        return {
+            "maps": maps,
+            "codecs": codecs,
+            "unsupported_subs": unsupported,
+            "expected": {"audio": n_audio, "subtitle": n_subs},
+        }
+
+    def _stream_counts(self, path: Path) -> Optional[Dict[str, int]]:
+        """Audio / subtitle stream counts of *path*, or None if unreadable."""
+        try:
+            r = subprocess.run(
+                [self.ffprobe, "-v", "quiet", "-print_format", "json",
+                 "-show_streams", str(path)],
+                check=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            streams = json.loads(r.stdout).get("streams", [])
+        except Exception:
+            return None
+        return {
+            "audio": sum(1 for s in streams if s.get("codec_type") == "audio"),
+            "subtitle": sum(1 for s in streams
+                            if s.get("codec_type") == "subtitle"),
+        }
+
+    def _build_remux_strategies(self, src: Path, dst: Path,
+                                plan: dict) -> list[dict]:
+        """Return the ffmpeg remux strategies to try in order.
+
+        Every strategy carries all mapped streams; a result that lost any
+        is rejected by the caller.
+        """
+        probe = self._remux_probe_args(src)
+        streams = plan["maps"] + ["-c", "copy"] + plan["codecs"]
 
         strats: list[dict] = []
-
-        if is_m2ts:
+        if src.suffix.lower() in _TS_SUFFIXES:
             strats.append({
                 "name": "m2ts_optimized",
                 "args": [
-                    self.ffmpeg, "-y", "-v", "warning", "-fflags", "+genpts",
-                    "-analyzeduration", "100M", "-probesize", "100M",
-                    "-i", str(src),
-                    "-map", "0:v", "-c:v", "copy",
-                    "-map", "0:a", "-c:a", "flac" if has_pcm else "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    "-fflags", "+discardcorrupt", "-map_metadata", "0",
-                    str(dst),
+                    self.ffmpeg, "-y", "-v", "warning",
+                    "-fflags", "+genpts+discardcorrupt", *probe,
+                    "-i", str(src), *streams,
+                    "-avoid_negative_ts", "make_zero", "-map_metadata", "0",
+                    "-f", "matroska", str(dst),
                 ],
             })
-
-        strats += [
-            {
-                "name": "selective_copy",
-                "args": [
-                    self.ffmpeg, "-y", "-v", "warning", "-fflags", "+genpts",
-                    "-i", str(src), "-c", "copy",
-                ] + map_args + [
-                    "-avoid_negative_ts", "make_zero", "-map_metadata", "0",
-                    str(dst),
-                ],
-            },
-            {
-                "name": "no_subtitles",
-                "args": [
-                    self.ffmpeg, "-y", "-v", "warning", "-fflags", "+genpts",
-                    "-i", str(src),
-                    "-map", "0:v", "-c:v", "copy",
-                    "-map", "0:a", "-c:a", "copy",
-                    "-avoid_negative_ts", "make_zero", "-map_metadata", "0",
-                    str(dst),
-                ],
-            },
-            {
-                "name": "force_remux",
-                "args": [
-                    self.ffmpeg, "-y", "-v", "warning",
-                    "-i", str(src),
-                    "-map", "0:v", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-map", "0:a", "-c:a", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    str(dst),
-                ],
-            },
-        ]
+        strats.append({
+            "name": "selective_copy",
+            "args": [
+                self.ffmpeg, "-y", "-v", "warning", "-fflags", "+genpts",
+                *probe, "-i", str(src), *streams,
+                "-avoid_negative_ts", "make_zero", "-map_metadata", "0",
+                "-f", "matroska", str(dst),
+            ],
+        })
         return strats
 
     # ── MKV info ─────────────────────────────────────────────────────────
@@ -656,6 +887,7 @@ class MKVLanguageDetector:
             self._mkv_info_cache.pop(key, None)
             self._duration_cache.pop(key, None)
             self._format_lang_cache.pop(key, None)
+            self._speech_cache.pop(key, None)
 
     def _convert_mkvmerge_to_ffprobe(self, data: dict) -> dict:
         type_map = {"video": "video", "audio": "audio", "subtitles": "subtitle"}
@@ -668,7 +900,9 @@ class MKVLanguageDetector:
                 "codec_name": props.get("codec_id", ""),
                 "tags": {},
             }
-            lang = props.get("language", "")
+            # IETF/BCP-47 overrides the legacy field (Matroska spec), and
+            # the language index reads it the same way.
+            lang = props.get("language_ietf") or props.get("language", "")
             if lang:
                 s["tags"]["language"] = lang
             name = props.get("track_name", "")
@@ -756,6 +990,7 @@ class MKVLanguageDetector:
         return audio_mod.detect_language_with_retries(
             self.whisper_model, self.ffmpeg, self.ffprobe,
             file_path, track_idx, stream_idx, self.config, max_retries,
+            duration=self.get_file_duration(file_path),
         )
 
     def _is_inplace_mp4(self, file_path: Path) -> bool:
@@ -770,7 +1005,7 @@ class MKVLanguageDetector:
             print(f"[DRY RUN] Would update track {track_index} → {language_code}")
             return True
         if self._is_inplace_mp4(file_path):
-            lang3 = convert_iso639_1_to_2(language_code.split("-")[0].lower())
+            lang3 = mp4_language_code(language_code)
             ok = mp4_mod.set_track_language(
                 file_path, "audio", track_index, lang3,
                 expected_count=len(self.find_all_audio_tracks(file_path)),
@@ -795,11 +1030,20 @@ class MKVLanguageDetector:
 
     # ── Subtitle processing (embedded) ───────────────────────────────────
     def process_subtitle_tracks(self, file_path: Path) -> Dict:
+        """Detect and label embedded subtitle tracks.
+
+        ``skipped`` (low confidence, no readable text, unsupported codec)
+        and ``failed`` (extraction failed) outcomes are final for this
+        version of the file: retrying gives the same result.  Only tracks
+        in ``retry_subtitle_tracks`` (the write failed, or an unexpected
+        error) keep the file queued for the next run.
+        """
         results = {
             "subtitle_tracks_found": 0,
             "processed_subtitle_tracks": [],
             "failed_subtitle_tracks": [],
             "skipped_subtitle_tracks": [],
+            "retry_subtitle_tracks": [],
             "subtitle_errors": [],
         }
         if not self.config.process_subtitles:
@@ -822,71 +1066,111 @@ class MKVLanguageDetector:
             logger.info("Skipping forced/SDH analysis for %s: MP4 only "
                         "supports a language tag", file_path.name)
         expected_sub_count = len(self.find_all_subtitle_tracks(file_path)) if is_mp4 else None
+        set_forced = bool(self.config.analyze_forced_subtitles) and not is_mp4
 
-        for sub_idx, stream_info, stream_idx, cur_lang in tracks:
-            subtitle_path = None
-            try:
-                subtitle_path = sub_mod.extract_subtitle_track(
-                    self.ffmpeg, file_path, sub_idx, stream_idx,
-                    self.get_mkv_info, self.config.show_details,
+        # Bitmap formats with no OCR path (VobSub, DVB) can't be read at
+        # all: skip them without reading the file.
+        readable = []
+        for track in tracks:
+            codec = track[1].get("codec_name")
+            if sub_mod.is_unsupported_subtitle_codec(codec):
+                results["skipped_subtitle_tracks"].append({
+                    "track_index": track[0],
+                    "detected_language": None,
+                    "confidence": 0.0,
+                    "reason": f"unsupported_codec ({codec})",
+                })
+            else:
+                readable.append(track)
+        if not readable:
+            return results
+
+        extracted = sub_mod.extract_subtitle_tracks(
+            self.ffmpeg, file_path, [(t[0], t[2]) for t in readable],
+            self.get_mkv_info, self.config.show_details,
+        )
+        try:
+            for sub_idx, stream_info, stream_idx, cur_lang in readable:
+                self._process_one_subtitle(
+                    file_path, sub_idx, stream_info, stream_idx, cur_lang,
+                    extracted.get(sub_idx), is_mp4, expected_sub_count,
+                    set_forced, results,
                 )
-                if not subtitle_path:
-                    results["failed_subtitle_tracks"].append(sub_idx)
-                    continue
-
-                lang_result = sub_mod.detect_subtitle_language(
-                    subtitle_path, file_path, sub_idx, stream_idx,
-                    self.ffmpeg, self.ffprobe, self.config.show_details,
-                )
-                if not lang_result:
-                    results["failed_subtitle_tracks"].append(sub_idx)
-                    continue
-
-                code = lang_result["language_code"]
-                conf = lang_result["confidence"]
-
-                if conf < self.config.subtitle_confidence_threshold:
-                    results["skipped_subtitle_tracks"].append({
-                        "track_index": sub_idx,
-                        "detected_language": code,
-                        "confidence": conf,
-                        "reason": "confidence_below_threshold",
-                    })
-                    continue
-
-                is_forced = False
-                if self.config.analyze_forced_subtitles and not is_mp4:
-                    is_forced = self._detect_forced(file_path, sub_idx, stream_idx, subtitle_path)
-
-                is_sdh = False
-                if (self.config.detect_sdh_subtitles and not is_mp4
-                        and subtitle_path.suffix.lower() != ".sup"):
-                    is_sdh = sub_mod.detect_sdh_subtitles(subtitle_path)
-
-                ok = sub_mod.update_subtitle_metadata(
-                    self.mkvpropedit, file_path, sub_idx, code,
-                    is_forced, is_sdh, self.config.dry_run, self.config.show_details,
-                    is_mp4=is_mp4, expected_count=expected_sub_count,
-                )
-                if ok:
-                    results["processed_subtitle_tracks"].append({
-                        "track_index": sub_idx,
-                        "detected_language": code,
-                        "previous_language": cur_lang,
-                        "confidence": conf,
-                        "is_forced": is_forced,
-                        "is_sdh": is_sdh,
-                    })
-                else:
-                    results["failed_subtitle_tracks"].append(sub_idx)
-            except Exception as exc:
-                logger.error("Error processing subtitle track %d: %s", sub_idx, exc)
-                results["failed_subtitle_tracks"].append(sub_idx)
-            finally:
-                if subtitle_path and subtitle_path.exists():
-                    subtitle_path.unlink()
+        finally:
+            for path in extracted.values():
+                _unlink_quiet(path)
 
         return results
+
+    def _process_one_subtitle(self, file_path: Path, sub_idx: int,
+                              stream_info: dict, stream_idx: int,
+                              cur_lang: str, subtitle_path: Optional[Path],
+                              is_mp4: bool, expected_sub_count: Optional[int],
+                              set_forced: bool, results: Dict) -> None:
+        """Detect, analyse and label one extracted subtitle track."""
+        if not subtitle_path:
+            logger.error("Could not extract subtitle track %d of %s",
+                         sub_idx, file_path.name)
+            results["failed_subtitle_tracks"].append(sub_idx)
+            return
+        try:
+            lang_result = sub_mod.detect_subtitle_language(
+                subtitle_path, file_path, sub_idx, stream_idx,
+                self.ffmpeg, self.ffprobe, self.config.show_details,
+            )
+            if not lang_result:
+                results["skipped_subtitle_tracks"].append({
+                    "track_index": sub_idx,
+                    "detected_language": None,
+                    "confidence": 0.0,
+                    "reason": "no_readable_text",
+                })
+                return
+
+            code = lang_result["language_code"]
+            conf = lang_result["confidence"]
+
+            if conf < self.config.subtitle_confidence_threshold:
+                results["skipped_subtitle_tracks"].append({
+                    "track_index": sub_idx,
+                    "detected_language": code,
+                    "confidence": conf,
+                    "reason": "confidence_below_threshold",
+                })
+                return
+
+            is_forced = False
+            if set_forced:
+                is_forced = self._detect_forced(file_path, sub_idx, stream_idx, subtitle_path)
+
+            is_sdh = False
+            if (self.config.detect_sdh_subtitles and not is_mp4
+                    and subtitle_path.suffix.lower() != ".sup"):
+                is_sdh = sub_mod.detect_sdh_subtitles(subtitle_path)
+
+            ok = sub_mod.update_subtitle_metadata(
+                self.mkvpropedit, file_path, sub_idx, code,
+                is_forced, is_sdh, self.config.dry_run, self.config.show_details,
+                is_mp4=is_mp4, expected_count=expected_sub_count,
+                set_forced=set_forced,
+                current_name=(stream_info.get("tags") or {}).get("title"),
+            )
+            if ok:
+                results["processed_subtitle_tracks"].append({
+                    "track_index": sub_idx,
+                    "detected_language": code,
+                    "previous_language": cur_lang,
+                    "confidence": conf,
+                    "is_forced": is_forced,
+                    "is_sdh": is_sdh,
+                })
+            else:
+                results["failed_subtitle_tracks"].append(sub_idx)
+                results["retry_subtitle_tracks"].append(sub_idx)
+        except Exception as exc:
+            logger.error("Error processing subtitle track %d: %s", sub_idx, exc)
+            results["failed_subtitle_tracks"].append(sub_idx)
+            results["retry_subtitle_tracks"].append(sub_idx)
 
     # ── External subtitle processing (independent) ───────────────────────
     def process_external_subtitle_file(self, sub_path: Path) -> Dict:
@@ -906,8 +1190,19 @@ class MKVLanguageDetector:
         }
 
         try:
+            is_text = sub_path.suffix.lower() not in (".sup", ".idx")
+            content = None
+            if is_text:
+                # Read (and decode) once for both language and SDH detection.
+                try:
+                    content = ext_sub_mod.read_subtitle_text(sub_path)
+                except OSError as exc:
+                    logger.error("Could not read subtitle file %s: %s", sub_path, exc)
+                    result["reason"] = "detection_failed"
+                    return result
+
             lang_result = ext_sub_mod.detect_external_subtitle_language(
-                sub_path, self.config.show_details,
+                sub_path, self.config.show_details, content=content,
             )
             if not lang_result:
                 result["reason"] = "detection_failed"
@@ -921,17 +1216,26 @@ class MKVLanguageDetector:
             if code in ("und", "zxx"):
                 result["status"] = "skipped"
                 result["reason"] = "undetermined_language"
-                return result
-
-            if conf < self.config.subtitle_confidence_threshold:
+            elif conf < self.config.subtitle_confidence_threshold:
                 result["status"] = "skipped"
                 result["reason"] = "confidence_below_threshold"
+            if result["status"] == "skipped":
+                # The same file gives the same answer next run: park it
+                # until it changes instead of re-detecting it every run.
+                if (self.config.use_tracking
+                        and hasattr(self, "tracker")
+                        and not self.config.dry_run):
+                    self.tracker.mark_external_subtitle_skipped(
+                        sub_path, result["reason"],
+                    )
                 return result
 
             # SDH detection for text-based subtitle files
             is_sdh = False
-            if self.config.detect_sdh_subtitles and sub_path.suffix.lower() != ".sup":
-                is_sdh = ext_sub_mod.detect_sdh_in_external_subtitle(sub_path)
+            if self.config.detect_sdh_subtitles and is_text:
+                is_sdh = ext_sub_mod.detect_sdh_in_external_subtitle(
+                    sub_path, content=content,
+                )
             result["is_sdh"] = is_sdh
 
             new_path = ext_sub_mod.rename_subtitle_with_language(
@@ -962,11 +1266,46 @@ class MKVLanguageDetector:
 
         return result
 
+    def _speech_intervals(self, file_path: Path) -> Optional[List[Tuple[float, float]]]:
+        """Speech intervals (seconds) of the first audio track, from VAD.
+
+        Memoized per file, so several ambiguous subtitle tracks share one
+        decode.  Returns None if the audio can't be analysed.
+        """
+        key = str(file_path)
+        if key in self._speech_cache:
+            return self._speech_cache[key]
+
+        intervals = None
+        audio_tracks = self.find_all_audio_tracks(file_path)
+        full_audio = None
+        if audio_tracks:
+            full_audio = audio_mod.extract_full_audio_track(
+                self.ffmpeg, file_path, 0, audio_tracks[0][2],
+                self.config.operation_timeout_seconds, self.config.show_details,
+            )
+        if full_audio:
+            try:
+                audio = audio_mod._decode_audio(full_audio)
+                if audio is not None:
+                    chunks = audio_mod._vad_speech(audio, self.config,
+                                                   self.config.show_details)
+                    if chunks is not None:
+                        sr = audio_mod.SAMPLE_RATE
+                        intervals = [(c["start"] / sr, c["end"] / sr)
+                                     for c in chunks]
+            finally:
+                _unlink_quiet(full_audio)
+        self._speech_cache[key] = intervals
+        return intervals
+
     def _detect_forced(self, file_path, sub_idx, stream_idx, subtitle_path):
         """Forced detection dispatcher."""
         if subtitle_path.suffix.lower() == ".sup":
             return sub_mod.detect_forced_pgs_subtitles(
                 self.ffprobe, file_path, sub_idx, self.config.show_details,
+                sup_path=subtitle_path,
+                duration=self.get_file_duration(file_path),
             )
 
         subs = sub_mod.parse_srt_file(subtitle_path)
@@ -989,42 +1328,32 @@ class MKVLanguageDetector:
         if confidence >= 2:
             return decision
 
-        # Low confidence → audio analysis
-        full_audio = audio_mod.extract_full_audio_track(
-            self.ffmpeg, file_path, 0, stream_idx,
-            self.config.operation_timeout_seconds, self.config.show_details,
-        )
-        if not full_audio:
-            return stats["density"] < 5.5 or stats["coverage_percent"] < 37.5
-
+        # Low confidence → compare subtitle timing with where speech is.
+        # Only the speech intervals are needed, which VAD gives directly
+        # (a full Whisper transcription of the film would cost minutes).
         try:
-            segments, info = self.whisper_model.transcribe(
-                str(full_audio), language=None, task="transcribe",
-                beam_size=1, best_of=1, temperature=0.0,
-                vad_filter=True,
-                vad_parameters={"min_speech_duration_ms": 250, "max_speech_duration_s": 30},
-                word_timestamps=True,
-            )
-            speech = [(s.start, s.end) for s in segments]
-            if not speech:
-                return True
-
-            total_speech = sum(e - s for s, e in speech)
-            overlap = 0.0
-            for ss, se in stats["subtitle_timings"]:
-                for sp_s, sp_e in speech:
-                    os_ = max(ss, sp_s)
-                    oe = min(se, sp_e)
-                    if os_ < oe:
-                        overlap += oe - os_
-
-            pct = (overlap / total_speech * 100) if total_speech > 0 else 0
-            return pct < 50
-        except Exception:
+            speech = self._speech_intervals(file_path)
+        except Exception as exc:
+            logger.debug("Speech analysis failed for %s: %s", file_path.name, exc)
+            speech = None
+        if speech is None:
             return stats["density"] < 5.5 or stats["coverage_percent"] < 37.5
-        finally:
-            if full_audio and full_audio.exists():
-                full_audio.unlink()
+        if not speech:
+            return True
+
+        total_speech = sum(e - s for s, e in speech)
+        overlap = 0.0
+        for ss, se in stats["subtitle_timings"]:
+            for sp_s, sp_e in speech:
+                os_ = max(ss, sp_s)
+                oe = min(se, sp_e)
+                if os_ < oe:
+                    overlap += oe - os_
+
+        pct = (overlap / total_speech * 100) if total_speech > 0 else 0
+        if self.config.show_details:
+            logger.info("Forced check: subtitles cover %.0f%% of speech", pct)
+        return pct < 50
 
     # ── Process single video file ────────────────────────────────────────
     def process_file(self, file_path: Path, _cached_key: str = None) -> Dict:
@@ -1045,6 +1374,7 @@ class MKVLanguageDetector:
             "undefined_tracks": 0,
             "processed_tracks": [],
             "failed_tracks": [],
+            "inconclusive_tracks": [],
             "errors": [],
             "subtitle_results": None,
             "external_subtitle_results": None,
@@ -1054,15 +1384,25 @@ class MKVLanguageDetector:
         abs_key = _cached_key or os.path.abspath(str(file_path))
 
         skip_audio = skip_subs = False
+        had_entry = False
         if self.config.use_tracking and hasattr(self, "tracker"):
             bypass = (
                 self.config.reprocess_all
                 or self.config.reprocess_all_subtitles
                 or bool(self.config.reprocess_language)
+                or self.config.force_reprocess
             )
+            entry = self.tracker.get_entry(file_path, key=abs_key)
+            if entry and bypass:
+                # Reprocess / force runs skip the batch check, so only
+                # merge into the entry if the file is still the same one.
+                had_entry = self.tracker.is_unchanged(abs_key)
             if not bypass:
-                entry = self.tracker.get_entry(file_path, key=abs_key)
                 if entry:
+                    # Unchanged (the batch check drops entries of changed
+                    # files) but only partly done: finish the rest and
+                    # merge into this entry rather than replacing it.
+                    had_entry = True
                     if entry.get("audio_processed"):
                         skip_audio = True
                     if entry.get("subtitle_processed"):
@@ -1105,7 +1445,14 @@ class MKVLanguageDetector:
                              file_path.name, original_audio_langs or "(none detected)")
 
             mkv_path = self.remux_to_mkv(file_path)
-            if mkv_path and mkv_path != file_path:
+            if mkv_path and mkv_path != file_path and self.config.dry_run:
+                # Nothing was written: preview detection on the source.
+                # The remux keeps audio / subtitle order, so track
+                # numbers match the MKV it would produce.
+                results["was_remuxed"] = True
+                results["mkv_file"] = str(mkv_path)
+                mkv_path = file_path
+            elif mkv_path and mkv_path != file_path:
                 results["was_remuxed"] = True
                 # Original file is gone/remuxed — its cached metadata
                 # no longer applies.
@@ -1122,9 +1469,11 @@ class MKVLanguageDetector:
                     except (subprocess.CalledProcessError, Exception):
                         pass
             elif not mkv_path:
-                results["errors"].append("Failed to remux")
+                reason = getattr(self, "last_remux_error", None)
+                results["errors"].append(
+                    f"Failed to remux: {reason}" if reason else "Failed to remux")
                 return results
-        results["mkv_file"] = str(mkv_path)
+        results["mkv_file"] = results["mkv_file"] or str(mkv_path)
 
         audio_ok = subtitle_ok = False
 
@@ -1136,13 +1485,12 @@ class MKVLanguageDetector:
             skip_subs = True
         if not skip_audio:
             if self.config.reprocess_language:
-                if self._reprocess_lang_force_all_audio:
-                    # Index-driven fast path: files are already targetted, so reprocess all given files
-                    tracks = self.find_all_audio_tracks(mkv_path)
-                else:
-                    tracks = self.find_audio_tracks_by_language(
-                        mkv_path, self.config.reprocess_language,
-                    )
+                # Only the tracks currently tagged with the code, on both
+                # the index-driven and the full-scan path.  If the index
+                # was stale, the refresh at the end of this file fixes it.
+                tracks = self.find_audio_tracks_by_language(
+                    mkv_path, self.config.reprocess_language,
+                )
             elif self.config.reprocess_all:
                 tracks = self.find_all_audio_tracks(mkv_path)
             else:
@@ -1179,6 +1527,14 @@ class MKVLanguageDetector:
                             results["failed_tracks"].append(tidx)
                             failures = True
                             continue
+                        if code == audio_mod.INCONCLUSIVE:
+                            # Speech but no confident language: keep the
+                            # current tag rather than guess.
+                            results["inconclusive_tracks"].append({
+                                "track_index": tidx,
+                                "previous_language": cur_lang,
+                            })
+                            continue
                         if self.update_mkv_language(mkv_path, tidx, code, self.config.dry_run):
                             results["processed_tracks"].append({
                                 "track_index": tidx,
@@ -1203,10 +1559,11 @@ class MKVLanguageDetector:
             sub_res = self.process_subtitle_tracks(mkv_path)
             results["subtitle_results"] = sub_res
 
+            # Skipped / unextractable tracks are final for this version of
+            # the file; only write failures and unexpected errors retry.
             subtitle_ok = (
-                not sub_res["failed_subtitle_tracks"]
+                not sub_res["retry_subtitle_tracks"]
                 and not sub_res["subtitle_errors"]
-                and not sub_res["skipped_subtitle_tracks"]
             )
         elif skip_subs:
             subtitle_ok = True
@@ -1214,12 +1571,30 @@ class MKVLanguageDetector:
         # ── Tracking ─────────────────────────────────────────────────────
         if (self.config.use_tracking and hasattr(self, "tracker")
                 and not self.config.dry_run):
-            if self.config.reprocess_language:
-                touched = bool(results["processed_tracks"]
-                               or results["failed_tracks"])
+            # Re-detection runs merge into the existing entry so lifetime
+            # label counts aren't inflated. A remuxed file has a new key
+            # and is tracked like a fresh one.
+            # A partly processed file (e.g. audio done, subtitles retried)
+            # also merges, so the half that was skipped this run keeps its
+            # flags, counts and track details.
+            partial = had_entry and not results["was_remuxed"]
+            merge_mode = (self.config.reprocess_language
+                          or partial
+                          or (self.config.reprocess_files
+                              and not results["was_remuxed"]))
+            if merge_mode:
+                sub_res = results.get("subtitle_results")
+                touched = partial or bool(
+                    results["processed_tracks"]
+                    or results["failed_tracks"]
+                    or results["inconclusive_tracks"]
+                    or (sub_res and (sub_res["processed_subtitle_tracks"]
+                                     or sub_res["failed_subtitle_tracks"]
+                                     or sub_res["skipped_subtitle_tracks"])))
                 if touched:
                     self._update_tracker_relabel(mkv_path, abs_key,
-                                                 audio_ok, results)
+                                                 audio_ok, results,
+                                                 subtitle_ok=subtitle_ok)
             else:
                 flags = []
                 if results["was_remuxed"]:
@@ -1244,6 +1619,8 @@ class MKVLanguageDetector:
                         flags.append("audio_labeled")
                     if any(t["detected_language"] == "zxx" for t in results["processed_tracks"]):
                         flags.append("silent_content")
+                if results["inconclusive_tracks"]:
+                    flags.append("inconclusive")
                 subtitle_count = 0
                 sub_res = results.get("subtitle_results")
                 if sub_res and sub_res.get("processed_subtitle_tracks"):
@@ -1251,7 +1628,7 @@ class MKVLanguageDetector:
                     flags.append("subtitle_labeled")
                 if not flags:
                     flags.append("no_action_required")
-                track_details = results["processed_tracks"] or None
+                track_details = _audio_track_details(results) or None
                 subtitle_details = None
                 if sub_res and sub_res.get("processed_subtitle_tracks"):
                     subtitle_details = sub_res["processed_subtitle_tracks"]
@@ -1269,14 +1646,28 @@ class MKVLanguageDetector:
         # ── Language index (incremental) ────────────────────────────────
         if not self.config.dry_run and hasattr(self, "language_index"):
             try:
-                # Invalidate the per-file ffprobe cache so the re-probe
-                # reflects any language tags we just wrote.
-                self._invalidate_file_caches(mkv_path)
-                from uldas.language_index import _probe_track_langs
-                audio_codes, sub_codes = _probe_track_langs(
-                    self.ffprobe, mkv_path, mkvmerge=self.mkvmerge,
-                    mp4_inplace=bool(self.config.mp4_support),
+                from uldas.language_index import (
+                    _probe_track_langs, track_langs_from_info,
                 )
+                sub_res = results.get("subtitle_results") or {}
+                wrote = bool(results["was_remuxed"]
+                             or results["processed_tracks"]
+                             or results["failed_tracks"]
+                             or sub_res.get("processed_subtitle_tracks")
+                             or sub_res.get("failed_subtitle_tracks")
+                             or sub_res.get("retry_subtitle_tracks"))
+                if wrote:
+                    # Re-probe so the index reflects the tags just written.
+                    self._invalidate_file_caches(mkv_path)
+                    audio_codes, sub_codes = _probe_track_langs(
+                        self.ffprobe, mkv_path, mkvmerge=self.mkvmerge,
+                        mp4_inplace=bool(self.config.mp4_support),
+                    )
+                else:
+                    # Nothing changed: the metadata read at the start of
+                    # this file is still current.
+                    audio_codes, sub_codes = track_langs_from_info(
+                        self.get_mkv_info(mkv_path))
                 self.language_index.update_file(mkv_path, audio_codes, sub_codes)
                 if results["was_remuxed"] and str(file_path) != str(mkv_path):
                     # Original file no longer exists after a successful remux.
@@ -1295,110 +1686,32 @@ class MKVLanguageDetector:
 
     # ── Tracker update for the by-language reprocess mode ────────────────
     def _update_tracker_relabel(self, mkv_path: Path, abs_key: str,
-                                audio_ok: bool, results: Dict) -> None:
-        """Merge a by-language re-detection result into the existing entry."""
-        existing = self.tracker.get_entry(mkv_path, key=abs_key) or {}
-
-        old_details = list(existing.get("track_details") or [])
-        new_details = results["processed_tracks"] or []
-        new_idxs = {t["track_index"] for t in new_details}
-        merged_details = [t for t in old_details
-                          if t.get("track_index") not in new_idxs]
-        merged_details.extend(new_details)
-        merged_details.sort(key=lambda t: t.get("track_index", 0))
-
-        prior_flags = list(existing.get("flags") or [])
-        # Strip silent_content / no_action_required; we recompute those.
-        flags = [f for f in prior_flags
-                 if f not in ("silent_content", "no_action_required")]
-        if any(t.get("detected_language") == "zxx" for t in merged_details):
-            if "silent_content" not in flags:
-                flags.append("silent_content")
-        if not flags:
-            flags.append("no_action_required")
-
-        # Preserve prior counts: relabels do not add to the lifetime total.
-        audio_count = int(existing.get("audio_tracks_labeled", 0))
-        if audio_count == 0 and "audio_labeled" not in prior_flags and new_details:
-            audio_count = sum(
-                1 for t in new_details if t.get("detected_language") != "zxx"
-            )
-            if audio_count and "audio_labeled" not in flags:
-                flags.append("audio_labeled")
-        subtitle_count = int(existing.get("subtitle_tracks_labeled", 0))
-
-        original_format = existing.get("original_format")
-        subtitle_details = existing.get("subtitle_details")
-        prior_audio = bool(existing.get("audio_processed", False))
-        prior_sub = bool(existing.get("subtitle_processed", False))
-        audio_success = prior_audio or audio_ok
-
-        self.tracker.mark_processed(
-            mkv_path,
-            audio_success,
-            prior_sub,
-            key=abs_key,
-            flags=flags,
-            audio_tracks_labeled=audio_count,
-            subtitle_tracks_labeled=subtitle_count,
-            track_details=merged_details or None,
-            subtitle_details=subtitle_details,
-            original_format=original_format,
+                                audio_ok: bool, results: Dict,
+                                subtitle_ok: bool = False) -> None:
+        """Merge a re-detection result into the existing entry."""
+        sub_res = results.get("subtitle_results")
+        self.tracker.merge_audio_relabel(
+            mkv_path, _audio_track_details(results),
+            audio_ok=audio_ok, key=abs_key,
+            subtitle_details=(sub_res["processed_subtitle_tracks"]
+                              if sub_res else None),
+            subtitle_ok=subtitle_ok if sub_res else None,
         )
 
     # ── Process explicit file list (no directory walk) ───────────────────
     def process_files(self, file_paths: List[Path]) -> List[Dict]:
         """Process a pre-built list of video files, bypassing the
         directory walk entirely.
-        Used by the reprocess-by-language fast path.
+        Used by the reprocess-by-language fast path and the
+        reprocess-specific-files action.
         """
         results: List[Dict] = []
 
         if self._should_cancel() or not file_paths:
             return results
 
-        ignore_tags = [t.lower() for t in (self.config.ignore_tags or [])
-                       if isinstance(t, str) and t]
-        match_dirs = bool(self.config.ignore_tags_match_dirs and ignore_tags)
-        root_prefixes: List[str] = []
-        if match_dirs:
-            from uldas.language_index import (
-                _normalize_path_prefixes, path_has_ignored_dir,
-            )
-            root_prefixes = _normalize_path_prefixes(list(self.config.path or []))
-
-        # The index may hold entries for containers the current settings
-        # no longer cover (e.g. MP4s indexed while MP4 support was on);
-        # those can't be labeled with the tools this run would use.
-        video_exts = scan_video_extensions(
-            self.config.remux_to_mkv, self.config.mp4_support,
-        )
-
-        actionable: List[Path] = []
-        missing = 0
-        ignored = 0
-        for fp in file_paths:
-            try:
-                if not fp.exists():
-                    missing += 1
-                    continue
-            except OSError:
-                missing += 1
-                continue
-            if fp.suffix.lower() not in video_exts:
-                ignored += 1
-                continue
-            if ignore_tags:
-                stem = fp.stem.lower()
-                if any(tag in stem for tag in ignore_tags):
-                    ignored += 1
-                    continue
-                if match_dirs and path_has_ignored_dir(
-                    os.path.abspath(str(fp)), ignore_tags, root_prefixes,
-                ):
-                    ignored += 1
-                    continue
-            actionable.append(fp)
+        from uldas.language_index import filter_index_paths
+        actionable, missing, ignored = filter_index_paths(file_paths, self.config)
 
         if missing or ignored:
             logger.info(
@@ -1407,14 +1720,10 @@ class MKVLanguageDetector:
                 missing, ignored, len(actionable),
             )
 
-        prev_force = self._reprocess_lang_force_all_audio
-        if self.config.reprocess_language:
-            self._reprocess_lang_force_all_audio = True
         try:
             if actionable:
                 results = self._process_video_files(actionable)
         finally:
-            self._reprocess_lang_force_all_audio = prev_force
             if self.config.use_tracking and hasattr(self, "tracker"):
                 self.tracker.save_if_dirty()
             if hasattr(self, "language_index"):
@@ -1443,8 +1752,20 @@ class MKVLanguageDetector:
             total_ext_subs_found = len(ext_sub_files) + new_already_labeled + sub_skipped
             new_ext_subs = len(ext_sub_files) + new_already_labeled
 
-            # Prune tracker entries for files that no longer exist
-            if (self.config.use_tracking and hasattr(self, "tracker")
+            # Prune tracker entries for files that no longer exist.  Skipped
+            # when the walk errored or saw nothing at all: an offline share
+            # mounted as an empty folder must not wipe a library's history.
+            seen = getattr(self, "_last_scan_seen_paths", None)
+            complete = bool(getattr(self, "_last_scan_complete", False))
+            prune_safe = complete and bool(seen)
+            if not complete:
+                logger.warning("Scan of %s was incomplete – not removing "
+                               "tracking entries for missing files", directory)
+            elif not seen:
+                logger.info("No media files found in %s – not removing "
+                            "tracking entries (is the share mounted?)", directory)
+            if (prune_safe and self.config.use_tracking
+                    and hasattr(self, "tracker")
                     and not self.config.dry_run):
                 on_vid_remove = None
                 on_sub_remove = None
@@ -1453,9 +1774,10 @@ class MKVLanguageDetector:
                     on_sub_remove = self.language_index.remove_ext_sub
                 pruned = self.tracker.prune_missing_files(
                     directory,
-                    seen_paths=getattr(self, "_last_scan_seen_paths", None),
+                    seen_paths=seen,
                     on_remove_video=on_vid_remove,
                     on_remove_ext_sub=on_sub_remove,
+                    extensions=getattr(self, "_last_scan_exts", None),
                 )
                 if pruned and self.config.show_details:
                     logger.info("Pruned %d orphaned tracker entries", pruned)

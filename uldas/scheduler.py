@@ -99,14 +99,10 @@ def _load_initial_schedule(state, config_path: str) -> None:
             config["schedule_type"] = schedule_type
             config["schedule_hours"] = schedule_hours
             config["schedule_cron"] = cron_expr
-            config_dir = os.path.dirname(config_path)
-            if config_dir:
-                os.makedirs(config_dir, exist_ok=True)
             # Reuse the project's existing YAML dumper for consistency
+            from uldas.config import write_config_yaml
             from uldas.webui.routes import _QuotedDumper
-            with open(config_path, "w", encoding="utf-8") as fh:
-                yaml.dump(config, fh, Dumper=_QuotedDumper,
-                          default_flow_style=False, sort_keys=False)
+            write_config_yaml(config_path, config, dumper=_QuotedDumper)
         except Exception as e:
             logger.warning("Could not persist initial schedule to config.yml: %s", e)
 
@@ -120,6 +116,15 @@ def _load_initial_schedule(state, config_path: str) -> None:
         # update_schedule sets the schedule_changed flag; clear it because the
         # initial seeding is not a "live edit" — the loop hasn't started yet.
         state.clear_schedule_changed()
+
+
+def _start_run_log() -> None:
+    """Switch to a new log file for the run about to start (the first run
+    keeps the file opened at startup)."""
+    from uldas.logging_setup import begin_run_log
+    path = begin_run_log()
+    if path is not None:
+        logger.info("Log file: %s", path)
 
 
 def run_on_schedule(run_fn: Callable, state=None,
@@ -140,6 +145,7 @@ def run_on_schedule(run_fn: Callable, state=None,
 
     # Run immediately on start
     if run_on_startup:
+        _start_run_log()
         print("=" * 60)
         print("ULDAS – Initial run on container start")
         print("=" * 60)
@@ -201,7 +207,10 @@ def run_on_schedule(run_fn: Callable, state=None,
 
             if state is not None:
                 state.set_next_run(nxt)
-                state.set_status("idle")
+                # A failed run keeps its error (and message) visible in the
+                # web UI until the next run starts.
+                if state.status != "error":
+                    state.set_status("idle")
                 state.clear_schedule_changed()
 
             print(f"\n{'=' * 60}")
@@ -229,6 +238,7 @@ def run_on_schedule(run_fn: Callable, state=None,
                 time.sleep(max(0, wait_seconds))
 
         # Execute
+        _start_run_log()
         print("=" * 60)
         print(f"ULDAS – Scheduled run at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)

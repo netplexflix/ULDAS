@@ -25,8 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install a patched static FFmpeg (>= 8.1.2) to fix CVE-2026-8461
-ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+# Install a patched static FFmpeg (>= 8.1.2) to fix CVE-2026-8461.
+# Release-branch build (8.1.x fixes only), not the development master.
+ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
 RUN curl -fsSL -o /tmp/ffmpeg.tar.xz "$FFMPEG_URL" \
     && mkdir -p /tmp/ffmpeg \
     && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 \

@@ -12,8 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 # ── CPU limits ───────────────────────────────────────────────────────────
+_cpu_limits_applied = False
+
+
 def setup_cpu_limits() -> None:
-    """Lower process priority and pin to 75 % of cores."""
+    """Lower process priority and pin to 75 % of cores.
+
+    Applied once per process: ``os.nice`` is relative, so repeating it on
+    every scheduled run would keep lowering the priority.
+    """
+    global _cpu_limits_applied
+    if _cpu_limits_applied:
+        return
+    _cpu_limits_applied = True
     try:
         proc = psutil.Process()
 
@@ -22,16 +33,35 @@ def setup_cpu_limits() -> None:
         elif hasattr(proc, "nice"):
             proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
 
-        cpu_count = psutil.cpu_count()
-        max_cores = max(1, int(cpu_count * 0.75))
-
         if hasattr(proc, "cpu_affinity"):
-            cores = list(range(min(max_cores, cpu_count)))
+            # 75 % of the cores this process may use — in a container
+            # pinned to e.g. cores 6-11 that is a subset of 6-11, not of
+            # the host's 0-N.
+            allowed = sorted(proc.cpu_affinity())
+            cores = allowed[:max(1, int(len(allowed) * 0.75))]
             proc.cpu_affinity(cores)
-            logger.info("Limited to %d of %d CPU cores", len(cores), cpu_count)
+            logger.info("Limited to %d of %d CPU cores", len(cores), len(allowed))
 
     except Exception as exc:
         logger.warning("Could not set CPU limits: %s", exc)
+
+
+def cgroup_cpu_quota() -> "float | None":
+    """CPU limit of the container (``docker --cpus 4`` → 4.0), or None."""
+    try:                                                    # cgroup v2
+        with open("/sys/fs/cgroup/cpu.max", encoding="ascii") as fh:
+            quota, period = fh.read().split()[:2]
+        return None if quota == "max" else int(quota) / int(period)
+    except (OSError, ValueError):
+        pass
+    try:                                                    # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", encoding="ascii") as fh:
+            quota = int(fh.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", encoding="ascii") as fh:
+            period = int(fh.read())
+        return quota / period if quota > 0 and period > 0 else None
+    except (OSError, ValueError):
+        return None
 
 
 def limit_subprocess_resources(cmd: list[str]) -> list[str]:
@@ -72,6 +102,14 @@ def convert_iso639_1_to_2(code: str) -> str:
     return ISO639_1_TO_2.get(code.lower(), code)
 
 
+def mp4_language_code(code: str) -> str:
+    """3-letter code to write into an MP4 ``mdhd`` box: ISO 639-2/T, as the
+    ISO base media format specifies (``deu``, not ``ger``)."""
+    from uldas.constants import ISO639_2_B_TO_T
+    lang3 = convert_iso639_1_to_2(code.split("-")[0].lower())
+    return ISO639_2_B_TO_T.get(lang3, lang3)
+
+
 def get_language_name(language_code: str) -> str:
     """Human-readable name for a language code."""
     from uldas.constants import LANGUAGE_NAMES
@@ -86,8 +124,53 @@ def get_language_name(language_code: str) -> str:
 
 
 # ── Hallucination detection ──────────────────────────────────────────────
-def is_likely_hallucination(text: str, show_details: bool = False) -> bool:
-    """Return *True* if *text* looks like a Whisper hallucination."""
+# Transcripts at least this long are real speech unless they are a
+# degenerate loop: genuine dialogue naturally contains stock phrases,
+# repeats and a falling type-token ratio.
+_LONG_TRANSCRIPT_WORDS = 40
+
+# Scripts Whisper tends to hallucinate on silent audio, with the
+# languages that genuinely use them (the check is skipped for those).
+_HALLUCINATION_SCRIPTS = (
+    (0x1780, 0x17FF, {"km"}),          # Khmer
+    (0x0E00, 0x0E7F, {"th"}),          # Thai
+    (0x1000, 0x109F, {"my"}),          # Myanmar
+    (0x0980, 0x09FF, {"bn", "as"}),    # Bengali / Assamese
+    (0x10A0, 0x10FF, {"ka"}),          # Georgian
+)
+
+_COMMON_HALLUCINATIONS = [
+    "okay up here we go", "i'm going to go get some water",
+    "let's go", "here we go", "okay let's go", "alright let's go",
+    "come on let's go", "okay here we go", "let me get some water",
+    "i'm going to get some water", "i need to get some water",
+    "hold on let me", "wait let me", "okay wait", "hold on",
+    "one second", "just a second", "give me a second", "let me just",
+]
+
+_GENERIC_HALLUCINATIONS = [
+    r"\b(okay|ok|alright|lets|here we go|come on)\b.*\b(go|water|get|just|wait)\b",
+    r"\bim (going to|gonna) (go|get)",
+    r"\b(hold on|wait|give me|let me) (a |just |)?(second|minute|moment)\b",
+]
+
+
+def _clean_words(text: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace."""
+    return " ".join(re.sub(r"[^\w\s]", "", text.lower()).split())
+
+
+_CLEAN_HALLUCINATIONS = [_clean_words(p) for p in _COMMON_HALLUCINATIONS]
+
+
+def is_likely_hallucination(text: str, language: str = None,
+                            show_details: bool = False) -> bool:
+    """Return *True* if *text* looks like a Whisper hallucination on
+    non-speech audio rather than a transcript of real speech.
+
+    *language* is the language Whisper detected; it keeps genuine Thai,
+    Khmer, etc. from being mistaken for script hallucinations.
+    """
     if not text or len(text.strip()) == 0:
         return True
 
@@ -96,69 +179,56 @@ def is_likely_hallucination(text: str, show_details: bool = False) -> bool:
     if len(text) < 3:
         return True
 
-    if len(set(text.replace(" ", ""))) <= 3 and len(text) > 10:
-        return True
-
-    unique_chars = len(set(text.replace(" ", "").replace("\n", "")))
-    if unique_chars <= 2 and len(text) > 20:
-        return True
-
-    if re.search(r"(.)\1{4,}", text):
-        return True
-    if re.search(r"(.{1,3})\1{3,}", text):
-        return True
-
-    # Non-Latin scripts commonly hallucinated on silent audio
-    non_latin = 0
-    for ch in text:
-        cp = ord(ch)
-        if (0x1780 <= cp <= 0x17FF or 0x0E00 <= cp <= 0x0E7F or
-                0x1000 <= cp <= 0x109F or 0x0980 <= cp <= 0x09FF or
-                0x10A0 <= cp <= 0x10FF):
-            non_latin += 1
-    if len(text) > 0 and (non_latin / len(text)) > 0.7:
-        return True
+    try:
+        raw = text.encode("utf-8")
+        compression = len(zlib.compress(raw)) / len(raw)
+    except Exception:
+        compression = 1.0
 
     words = text.split()
-    if len(words) > 3:
-        if len(set(words)) / len(words) < 0.2:
+    if len(words) >= _LONG_TRANSCRIPT_WORDS:
+        # Only a looping transcript ("Thank you. Thank you. …")
+        # compresses this well; real dialogue stays well above it.
+        return compression < 0.2
+
+    # Repetition checks look at letters only, so ellipses ("....") and
+    # numbers ("1000000") don't count as repeated content.
+    letters = re.sub(r"[\W\d_]+", "", text.lower())
+    if len(set(letters)) <= 3 and len(letters) > 10:
+        return True
+    if re.search(r"(.)\1{4,}", letters):
+        return True
+    if re.search(r"(.{1,3})\1{3,}", letters):
+        return True
+
+    lang = (language or "").lower()
+    for lo, hi, script_langs in _HALLUCINATION_SCRIPTS:
+        if lang in script_langs:
+            continue
+        in_script = sum(1 for ch in text if lo <= ord(ch) <= hi)
+        if in_script / len(text) > 0.7:
             return True
 
-    if len(text) > 20:
-        parts = text.split()
-        if len(parts) > 5 and len(set(parts)) <= 2:
-            return True
+    clean = _clean_words(text)
+    clean_words = clean.split()
+    if len(clean_words) > 3 and len(set(clean_words)) / len(clean_words) < 0.2:
+        return True
+    if len(clean_words) > 5 and len(set(clean_words)) <= 2:
+        return True
 
-    try:
-        compressed = zlib.compress(text.encode("utf-8"))
-        if len(compressed) / len(text.encode("utf-8")) < 0.3:
-            return True
-    except Exception:
-        pass
+    if compression < 0.3:
+        return True
 
-    common_hallucinations = [
-        "okay up here we go", "i'm going to go get some water",
-        "let's go", "here we go", "okay let's go", "alright let's go",
-        "come on let's go", "okay here we go", "let me get some water",
-        "i'm going to get some water", "i need to get some water",
-        "hold on let me", "wait let me", "okay wait", "hold on",
-        "one second", "just a second", "give me a second", "let me just",
-    ]
-
-    clean = re.sub(r"[^\w\s]", "", text.lower().strip())
-    for phrase in common_hallucinations:
-        if phrase in clean:
+    # Stock phrases only count when they are (nearly) the whole
+    # transcript, not when they occur somewhere inside real dialogue.
+    for phrase in _CLEAN_HALLUCINATIONS:
+        if phrase in clean and len(clean_words) <= len(phrase.split()) + 3:
             if show_details:
                 logger.info("Detected common hallucination phrase: '%s'", phrase)
             return True
 
-    if len(text.lower()) < 50:
-        generic = [
-            r"\b(okay|ok|alright|let's|here we go|come on)\b.*\b(go|water|get|just|wait)\b",
-            r"\bi'm (going to|gonna) (go|get)",
-            r"\b(hold on|wait|give me|let me) (a |just |)?(second|minute|moment)\b",
-        ]
-        for pat in generic:
+    if len(clean) < 50:
+        for pat in _GENERIC_HALLUCINATIONS:
             if re.search(pat, clean):
                 if show_details:
                     logger.info("Detected generic hallucination pattern: %s", pat)

@@ -48,6 +48,7 @@ def print_detailed_summary(
     total = len(video_results)
     acted = success = failed = processed = skipped = 0
     silent_files: list[str] = []
+    inconclusive_files: list[str] = []
 
     for r in video_results:
         if r.get("skipped_due_to_tracking"):
@@ -58,6 +59,7 @@ def print_detailed_summary(
         actions: list[str] = []
         has_fail = False
         has_silent = False
+        has_inconclusive = False
 
         if r["was_remuxed"]:
             actions.append("remuxed")
@@ -77,6 +79,12 @@ def print_detailed_summary(
             else:
                 actions.append(f"{CYAN}track{idx}: {prev_fmt} -> {lang_fmt}{RESET}")
 
+        for t in sorted(r.get("inconclusive_tracks", []), key=lambda x: x["track_index"]):
+            prev = t.get("previous_language", "und")
+            kept = "" if prev == "und" else f", kept {prev}"
+            actions.append(f"{YELLOW}track{t['track_index']}: und (inconclusive{kept}){RESET}")
+            has_inconclusive = True
+
         for idx in sorted(r.get("failed_tracks", [])):
             actions.append(f"{RED}track{idx}: failed{RESET}")
             has_fail = True
@@ -91,6 +99,8 @@ def print_detailed_summary(
                 success += 1
             if has_silent:
                 silent_files.append(name)
+            if has_inconclusive:
+                inconclusive_files.append(name)
         elif r["errors"]:
             print(f"{name}: {RED}error{RESET} – {r['errors'][0]}")
             acted += 1
@@ -116,6 +126,14 @@ def print_detailed_summary(
             print(f"{YELLOW}   - {f}{RESET}")
         if len(silent_files) > 5:
             print(f"{YELLOW}   ... and {len(silent_files) - 5} more{RESET}")
+
+    if inconclusive_files:
+        print(f"\n{YELLOW}⚠️  {len(inconclusive_files)} file(s) had audio with no "
+              f"confident language – tag left unchanged{RESET}")
+        for f in inconclusive_files[:5]:
+            print(f"{YELLOW}   - {f}{RESET}")
+        if len(inconclusive_files) > 5:
+            print(f"{YELLOW}   ... and {len(inconclusive_files) - 5} more{RESET}")
 
     if detector and detector.deletion_failures:
         print(f"\n{YELLOW}⚠️  WARNING: {len(detector.deletion_failures)} original file(s) could not be deleted{RESET}")
@@ -161,8 +179,13 @@ def print_detailed_summary(
                     reset = RESET if colour else ""
                     print(f"  {colour}subtitle track{st['track_index']}: {prev} -> {lang}{reset} (conf: {conf:.2f}){flag_str}")
                 for st in sr.get("skipped_subtitle_tracks", []):
+                    if st.get("reason") == "confidence_below_threshold":
+                        detail = (f"detected: {st['detected_language']}, "
+                                  f"conf: {st['confidence']:.2f}")
+                    else:
+                        detail = str(st.get("reason", "unknown")).replace("_", " ")
                     print(f"  {YELLOW}subtitle track{st['track_index']}: skipped{RESET} "
-                          f"(detected: {st['detected_language']}, conf: {st['confidence']:.2f})")
+                          f"({detail})")
                 for idx in sr["failed_subtitle_tracks"]:
                     print(f"  {RED}subtitle track{idx}: failed{RESET}")
 
@@ -170,7 +193,7 @@ def print_detailed_summary(
             print(f"\nSubtitle tracks found: {t_found}")
             print(f"Successfully processed: {t_proc}")
             if t_skip:
-                print(f"{YELLOW}Skipped (low confidence): {t_skip}{RESET}")
+                print(f"{YELLOW}Skipped (not retried until the file changes): {t_skip}{RESET}")
             if t_fail:
                 print(f"{RED}Failed: {t_fail}{RESET}")
             if t_forced:

@@ -42,7 +42,11 @@ class SchedulerState:
         # Cross-thread signaling
         self._wake_event = threading.Event()
         self._run_requested = threading.Event()
-        self._stop_requested = threading.Event()
+        # Two separate things: "paused" stops scheduled runs; "cancel"
+        # stops the run in progress.  Stop sets both, but a manual run
+        # while paused clears only the cancel flag so it actually runs.
+        self._stop_requested = threading.Event()     # paused
+        self._cancel_requested = threading.Event()
         self._schedule_changed = threading.Event()
 
     # ── Getters ───────────────────────────────────────────────────────────
@@ -175,7 +179,12 @@ class SchedulerState:
     # ── Event helpers ─────────────────────────────────────────────────────
 
     def is_stopped(self) -> bool:
+        """True while scheduling is paused by the user."""
         return self._stop_requested.is_set()
+
+    def is_cancel_requested(self) -> bool:
+        """True when the run in progress should stop after its current file."""
+        return self._cancel_requested.is_set()
 
     def is_run_requested(self) -> bool:
         return self._run_requested.is_set()
@@ -194,9 +203,11 @@ class SchedulerState:
 
         *options* is an optional dict of one-shot Config overrides applied
         to the next run only (e.g. ``{"reprocess_zxx": True}``).
+        A paused scheduler stays paused; only this run goes ahead.
         """
         with self._lock:
             self._run_options = dict(options) if options else {}
+        self._cancel_requested.clear()
         self._run_requested.set()
         self._wake_event.set()
 
@@ -222,13 +233,16 @@ class SchedulerState:
             self._run_options = dict(options) if options else {}
 
     def request_stop(self) -> None:
-        """Signal the scheduler to pause after the current run completes."""
+        """Cancel the run in progress (after its current file) and pause
+        scheduling."""
         self._stop_requested.set()
+        self._cancel_requested.set()
         self._wake_event.set()
 
     def request_resume(self) -> None:
         """Signal the scheduler to resume CRON scheduling."""
         self._stop_requested.clear()
+        self._cancel_requested.clear()
         self._wake_event.set()
 
     # ── Persistence ───────────────────────────────────────────────────────

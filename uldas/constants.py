@@ -1,6 +1,6 @@
 #file: uldas/constants.py
 
-VERSION = "2026.09.26"
+VERSION = "2026.10.18"
 
 # ── Language name → ISO 639-2 (bibliographic) ────────────────────────────
 LANGUAGE_CODES: dict[str, str] = {
@@ -163,9 +163,21 @@ ISO639_2_TO_1: dict[str, str] = {
 }
 
 # Alternative 3-letter codes (ISO 639-2/T vs 639-2/B)
+# ISO 639-2/T (terminology) codes of the languages whose /B code differs.
 ISO639_ALTERNATIVE_CODES: dict[str, str] = {
     "deu": "de", "fra": "fr", "nld": "nl", "ces": "cs",
     "slk": "sk", "ron": "ro",
+    "zho": "zh", "ell": "el", "fas": "fa", "msa": "ms", "isl": "is",
+    "sqi": "sq", "hye": "hy", "eus": "eu", "mya": "my", "kat": "ka",
+    "mkd": "mk", "mri": "mi", "bod": "bo", "cym": "cy",
+}
+
+# ISO 639-2/B → /T.  MP4 (ISO base media) language fields use /T codes.
+ISO639_2_B_TO_T: dict[str, str] = {
+    "ger": "deu", "fre": "fra", "dut": "nld", "cze": "ces", "slo": "slk",
+    "rum": "ron", "chi": "zho", "gre": "ell", "per": "fas", "may": "msa",
+    "ice": "isl", "alb": "sqi", "arm": "hye", "baq": "eus", "bur": "mya",
+    "geo": "kat", "mac": "mkd", "mao": "mri", "tib": "bod", "wel": "cym",
 }
 
 # ── ISO 639-1 → ISO 639-2 (reverse) ─────────────────────────────────────
@@ -375,6 +387,18 @@ VIDEO_EXTENSIONS: set[str] = {
 
 # ISO-BMFF containers that can be language-tagged in place (see uldas/mp4.py)
 MP4_EXTENSIONS: set[str] = {".mp4", ".m4v"}
+
+# Blu-ray / DVD / HD DVD folder rips (lower-case directory names).  Their
+# .m2ts / .VOB files are pieces of a disc structure players read as a
+# whole, never standalone videos: not scanned, never remuxed.
+DISC_STRUCTURE_DIRS: set[str] = {"bdmv", "video_ts", "hvdvd_ts"}
+
+
+def in_disc_structure(path) -> bool:
+    """True if *path* lies inside a Blu-ray / DVD folder structure."""
+    import os
+    parts = os.path.normpath(str(path)).replace("\\", "/").split("/")
+    return any(p.lower() in DISC_STRUCTURE_DIRS for p in parts[:-1])
 
 
 def scan_video_extensions(remux_to_mkv: bool, mp4_support: bool) -> set[str]:

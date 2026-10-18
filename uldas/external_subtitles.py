@@ -1,4 +1,5 @@
 #file: uldas/external_subtitles.py
+import codecs
 import logging
 import os
 import re
@@ -9,6 +10,7 @@ from uldas.constants import (
     ISO639_1_TO_2,
     ISO639_2_TO_1,
     ISO639_ALTERNATIVE_CODES,
+    LANGUAGE_CODES,
 )
 from uldas.utils import convert_iso639_1_to_2
 
@@ -25,56 +27,182 @@ _ALL_LANG_CODES.update({"zxx", "und"})
 _KNOWN_FLAGS: set[str] = {"forced", "sdh", "hi", "cc", "default", "full"}
 
 
-def _is_language_code(token: str) -> bool:
-    return token.lower() in _ALL_LANG_CODES
+# Region / script tagged codes (BCP-47): "pt-BR", "zh-Hant", "es-419".
+_BCP47_RE = re.compile(r"([a-z]{2,3})(?:-[a-z0-9]{2,8})+")
+
+
+def _tag_to_code(token: str) -> Optional[str]:
+    """The language code a filename token stands for, or None.
+
+    Accepts plain codes ("en", "eng"), BCP-47 tags with a known primary
+    language ("pt-br", "zh-cn") and language names ("English" -> "eng").
+    """
+    t = token.lower()
+    if t in _ALL_LANG_CODES:
+        return t
+    m = _BCP47_RE.fullmatch(t)
+    if m and m.group(1) in _ALL_LANG_CODES:
+        return t
+    return LANGUAGE_CODES.get(t)
+
+
+def _parse_language_tail(stem: str) -> "tuple[str, Optional[str], list]":
+    """Split ``Movie.en.forced.sdh`` into ``("Movie", "en", ["forced", "sdh"])``.
+
+    Trailing flags (forced, sdh, hi, …) are stripped first, however many
+    there are, then the token before them is read as the language:
+    ``Movie.en.hi`` is English, not Hindi.  A lone ``hi`` with no language
+    before it (``Movie.hi``) is Hindi.  Flags keep their order; the code is
+    None when the name carries no language.  Shared by the scan and the
+    renamer so the two always read a name the same way.
+    """
+    tokens = stem.split(".")
+    flags: list = []
+    while len(tokens) > 1 and tokens[-1].lower() in _KNOWN_FLAGS:
+        flag = tokens.pop().lower()
+        if flag not in flags:
+            flags.insert(0, flag)
+    code = None
+    if len(tokens) > 1:
+        code = _tag_to_code(tokens[-1])
+        if code:
+            tokens.pop()
+    if code is None and flags:
+        code = _tag_to_code(flags[0])
+        if code:
+            flags.pop(0)            # "Movie.hi.srt": the language, not a flag
+    return ".".join(tokens), code, flags
 
 
 def get_language_tag(subtitle_path: Path) -> Optional[str]:
     """Return the language code embedded in the subtitle filename, or *None*.
 
     Recognises patterns like ``movie.en.srt``, ``movie.eng.srt``,
-    ``movie.en.sdh.srt``, etc.
+    ``movie.pt-BR.srt``, ``movie.English.srt``, ``movie.en.sdh.srt``,
+    ``movie.en.forced.sdh.srt``, etc.  Language names are returned as
+    their code.
     """
-    name = subtitle_path.name
-    # Split off the final extension
-    parts = name.rsplit(".", 2)
-    if len(parts) < 3:
+    if subtitle_path.name.count(".") < 2:
         # Only one dot → no language tag  (e.g. "Movie.srt")
         return None
+    return _parse_language_tail(subtitle_path.stem)[1]
 
-    # parts[-2] is the candidate language tag (or flag)
-    candidate = parts[-2].lower()
 
-    # Check if the candidate itself is a language code
-    if _is_language_code(candidate):
-        return candidate
+# ── VobSub (.idx + binary .sub) ─────────────────────────────────────────
+_IDX_LANG_RE = re.compile(r"^\s*id\s*:\s*([A-Za-z]{2,3})\s*,\s*index\s*:", re.MULTILINE)
 
-    # Check if it's a flag like "sdh" or "forced" — if so, look one
-    # level deeper for the language code
-    if candidate in _KNOWN_FLAGS:
-        deeper_parts = name.rsplit(".", 3)
-        if len(deeper_parts) >= 4:
-            deeper_candidate = deeper_parts[-3].lower()
-            if _is_language_code(deeper_candidate):
-                return deeper_candidate
 
+def is_vobsub_data(sub_path: Path) -> bool:
+    """True for the binary half of a VobSub pair: a ``.sub`` next to a
+    ``.idx``, or one holding MPEG-PS data.  It carries no readable text
+    and is renamed together with its ``.idx``."""
+    if sub_path.suffix.lower() != ".sub":
+        return False
+    if _sibling_with_suffix(sub_path, ".idx") is not None:
+        return True
+    try:
+        with open(sub_path, "rb") as fh:
+            return fh.read(4) == b"\x00\x00\x01\xba"
+    except OSError:
+        return False
+
+
+def _sibling_with_suffix(path: Path, suffix: str) -> Optional[Path]:
+    """The file next to *path* with the same stem and *suffix* (any case)."""
+    for candidate in (path.with_suffix(suffix.lower()),
+                      path.with_suffix(suffix.upper())):
+        if candidate.exists():
+            return candidate
     return None
+
+
+def read_idx_languages(idx_path: Path) -> list:
+    """Language codes declared by a VobSub index (``id: en, index: 0``)."""
+    try:
+        with open(idx_path, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError:
+        return []
+    langs: list = []
+    for code in _IDX_LANG_RE.findall(content):
+        code = code.lower()
+        if code not in langs:
+            langs.append(code)
+    return langs
+
+
+# UTF-32 first: its little-endian BOM starts with the UTF-16 one.
+_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def read_subtitle_text(subtitle_path: Path) -> str:
+    """Text of a subtitle file in whatever encoding it was saved in.
+
+    Plenty of subtitles aren't UTF-8: legacy code pages (cp1251 Cyrillic,
+    cp1256 Arabic, GBK, ...) and UTF-16 from Windows tools.  Read as
+    UTF-8 those leave nothing language detection can use.
+    Line endings come back as ``\\n``, as text-mode reading gives them:
+    the parsers split on it, and a CRLF ``.srt`` would otherwise read as
+    one single block.  Raises OSError if the file can't be read.
+    """
+    text = _decode_subtitle_bytes(Path(subtitle_path).read_bytes())
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _decode_subtitle_bytes(raw: bytes) -> str:
+    for bom, encoding in _BOMS:
+        if raw.startswith(bom):
+            return raw.decode(encoding, errors="replace")
+    head = raw[:4096]
+    if b"\x00" in head:
+        # UTF-16 without a BOM: ASCII characters leave every other byte NUL.
+        le = head[1::2].count(0) >= head[0::2].count(0)
+        return raw.decode("utf-16-le" if le else "utf-16-be", errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        from charset_normalizer import from_bytes
+        best = from_bytes(raw).best()
+        if best is not None:
+            return str(best)
+    except ImportError:
+        pass
+    return raw.decode("cp1252", errors="replace")
 
 
 def detect_external_subtitle_language(
     subtitle_path: Path,
     show_details: bool = False,
+    content: Optional[str] = None,
 ) -> Optional[Dict]:
+    """*content* is the file's text when the caller has already read it."""
     try:
         ext = subtitle_path.suffix.lower()
 
-        # Read the file content
-        try:
-            with open(subtitle_path, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except Exception as exc:
-            logger.error("Could not read subtitle file %s: %s", subtitle_path, exc)
-            return None
+        # A VobSub index declares its language; its text is boilerplate.
+        if ext == ".idx":
+            langs = read_idx_languages(subtitle_path)
+            if len(langs) == 1:
+                return {"language_code": convert_iso639_1_to_2(langs[0]),
+                        "confidence": 1.0}
+            if show_details:
+                logger.info("%s declares %s – leaving it unlabeled",
+                            subtitle_path.name,
+                            ", ".join(langs) if langs else "no language")
+            return {"language_code": "und", "confidence": 0.0}
+
+        if content is None:
+            try:
+                content = read_subtitle_text(subtitle_path)
+            except Exception as exc:
+                logger.error("Could not read subtitle file %s: %s", subtitle_path, exc)
+                return None
 
         if not content or len(content.strip()) < 50:
             if show_details:
@@ -332,17 +460,18 @@ def _detect_language_by_characters(text: str) -> Optional[Dict]:
     return {"language_code": "und", "confidence": 0.1}
 
 
-def detect_sdh_in_external_subtitle(subtitle_path: Path) -> bool:
+def detect_sdh_in_external_subtitle(subtitle_path: Path,
+                                    content: Optional[str] = None) -> bool:
     try:
         ext = subtitle_path.suffix.lower()
 
-        try:
-            with open(subtitle_path, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except Exception as exc:
-            logger.error("Could not read subtitle file for SDH detection %s: %s",
-                         subtitle_path, exc)
-            return False
+        if content is None:
+            try:
+                content = read_subtitle_text(subtitle_path)
+            except Exception as exc:
+                logger.error("Could not read subtitle file for SDH detection %s: %s",
+                             subtitle_path, exc)
+                return False
 
         if not content:
             return False
@@ -443,23 +572,14 @@ def rename_subtitle_with_language(
         from uldas.constants import ISO639_2_TO_1
         short_code = ISO639_2_TO_1.get(language_code, language_code)
 
-        name = subtitle_path.name
         ext = subtitle_path.suffix  # e.g. ".srt"
-        stem = subtitle_path.stem   # e.g. "Movie.Name" or "Movie.Name.en"
+        # The old language (if any) is dropped; the detected one is written.
+        base_stem, _, flags = _parse_language_tail(subtitle_path.stem)
+        if is_sdh and not ({"sdh", "hi", "cc"} & set(flags)):
+            flags.append("sdh")
 
-        # Check if there's already a language tag to replace
-        parts = stem.rsplit(".", 1)
-        if len(parts) == 2 and _is_language_code(parts[1]):
-            # Replace existing language tag
-            base_stem = parts[0]
-        else:
-            base_stem = stem
-
-        # Build new filename with language and optional SDH tag
-        if is_sdh:
-            new_name = f"{base_stem}.{short_code}.sdh{ext}"
-        else:
-            new_name = f"{base_stem}.{short_code}{ext}"
+        # Language first, then the flags: "Movie.en.forced.sdh.srt"
+        new_name = ".".join([base_stem, short_code, *flags]) + ext
 
         new_path = subtitle_path.parent / new_name
 
@@ -473,11 +593,31 @@ def rename_subtitle_with_language(
                 logger.warning("Target file already exists, skipping: %s", new_name)
             return None
 
+        # A VobSub index only works next to its .sub: rename both or neither.
+        pair_src = pair_dst = None
+        if ext.lower() == ".idx":
+            pair_src = _sibling_with_suffix(subtitle_path, ".sub")
+            if pair_src is not None:
+                pair_dst = new_path.with_suffix(pair_src.suffix)
+                if pair_dst.exists():
+                    if show_details:
+                        logger.warning("Target file already exists, skipping: %s",
+                                       pair_dst.name)
+                    return None
+
         if dry_run:
             print(f"[DRY RUN] Would rename {subtitle_path.name} → {new_name}")
+            if pair_src is not None:
+                print(f"[DRY RUN] Would rename {pair_src.name} → {pair_dst.name}")
             return new_path
 
         subtitle_path.rename(new_path)
+        if pair_src is not None:
+            try:
+                pair_src.rename(pair_dst)
+            except OSError:
+                new_path.rename(subtitle_path)   # keep the pair together
+                raise
 
         if show_details:
             logger.info("Renamed: %s → %s", subtitle_path.name, new_name)
