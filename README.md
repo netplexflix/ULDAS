@@ -37,7 +37,7 @@ Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [langdetect](h
   - [Expert variables](#expert-variables)
   - [Model Size Guide](#model-size-guide)
 - [🌐 WebUI](#webui)
-- [🔔 Webhook on Remux](#webhook-on-remux)
+- [🔔 Webhook](#webhook-on-remux)
 - [📄 Supported File Formats](#supported-file-formats)
 - [⌨️ CLI Reference](#cli-reference)
   - [Utility Commands](#utility-commands)
@@ -93,10 +93,6 @@ services:
       #   "0 5 * * 5"    = every Friday at 5:00 AM
       # Alternative: use a simple hours interval instead of cron:
       # - SCHEDULE_HOURS=24
-      # To run once and exit instead of on a schedule, add `command: --once`
-      # and set `restart: "no"` (with `unless-stopped` Docker restarts the
-      # container, and the run, after every exit). Removing the scheduler env
-      # vars is not enough once a schedule has been saved to config.yml.
       #
       # NOTE: CRON_SCHEDULE / SCHEDULE_HOURS are only used as initial defaults
       # on first launch. Once saved to config.yml they can be edited live from
@@ -293,18 +289,18 @@ Here you can edit settings and check your log.
 ***
 
 <a id="webhook-on-remux"></a>
-## 🔔 Webhook on Remux
+## 🔔 Webhook
 
-ULDAS can send an HTTP request after each remux. (e.g. for triggering Autoscan/Autopulse/..)
-Enable it in the WebUI under **Settings → Advanced → Webhook**, or in `config.yml`.
+ULDAS can send an HTTP request after each file it changes, whether it was remuxed or had its language tags / subtitle flags edited in place (e.g. for triggering Autoscan/Autopulse/..). This lets Plex, Jellyfin or Emby pick up the new track languages without a full library scan.
+Enable it in the WebUI on the **Webhook** tab, or in `config.yml`.
 
 | Variable | Value |
 | --- | --- |
-| `{path}` / `{path_enc}` | Full path of the remuxed `.mkv` (raw / URL-encoded) |
+| `{path}` / `{path_enc}` | Full path of the changed file (raw / URL-encoded) |
 | `{dir}` / `{dir_enc}` | Parent folder of the file |
 | `{filename}` | File name with extension |
 | `{name_noext}` | File name without extension |
-| `{old_path}` / `{old_path_enc}` | Original pre-remux file path |
+| `{old_path}` / `{old_path_enc}` | Original pre-remux file path (same as `{path}` for in-place edits) |
 
 > Use the `_enc` variants whenever the value goes into a URL query string or a form body, since media paths contain spaces and special characters.
 
@@ -316,7 +312,8 @@ Enable it in the WebUI under **Settings → Advanced → Webhook**, or in `confi
 | `webhook_timeout_seconds` | Request timeout (default `10`). The call is fire-and-forget — it never blocks or fails a run |
 | `webhook_path_from` / `webhook_path_to` | Optional path remap, for when ULDAS's container mounts differ from your media server's. The leading `from` path is replaced with `to` before the `{path}` variables are built |
 
-The webhook only fires on an actual remux (the rename event), never on in-place language-tag edits, and is skipped entirely during `dry_run`.
+The webhook fires after every remux and every in-place edit (audio language, subtitle language or flags, and *Change audio language tag* runs). Files with nothing to change don't trigger it, and it is skipped entirely during `dry_run`.
+Identical requests are only sent once per run, so a URL built from `{dir}` / `{dir_enc}` triggers one scan per folder instead of one per file.
 
 ***
 

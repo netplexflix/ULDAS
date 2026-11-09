@@ -165,6 +165,17 @@ body {
 .nav-links a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
 .nav-links a.active { color: var(--text-primary); background: var(--bg-tertiary); }
 
+/* Narrow desktop: centred tabs would run into the brand, so let them
+   follow it on the right instead. (≤768px stacks them below the brand.) */
+@media (min-width: 769px) and (max-width: 900px) {
+    .nav-links {
+        position: static;
+        transform: none;
+        margin-left: auto;
+    }
+    .nav-links a { white-space: nowrap; }
+}
+
 /* ── Main content ─────────────────────────────────────────────────────── */
 .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
 
@@ -1358,6 +1369,7 @@ input[type="date"] { color-scheme: dark; }
     <div class="nav-links">
         <a href="#" data-page="dashboard" class="active">Dashboard</a>
         <a href="#" data-page="settings">Settings</a>
+        <a href="#" data-page="webhook">Webhook</a>
         <a href="#" data-page="log">Processing Log</a>
     </div>
 </nav>
@@ -1487,10 +1499,6 @@ input[type="date"] { color-scheme: dark; }
         </div>
         <div id="advanced-options"></div>
     </div>
-    <div class="settings-section" id="webhook-settings" style="display:none">
-        <h2>Webhook</h2>
-        <div id="webhook-options"></div>
-    </div>
     <div class="settings-section" id="maintenance-settings" style="display:none">
         <h2>Maintenance Actions</h2>
         <div class="maintenance-actions">
@@ -1578,6 +1586,17 @@ input[type="date"] { color-scheme: dark; }
     </div>
 </div>
 
+<!-- ── Webhook ─────────────────────────────────────────────────────────── -->
+<div id="page-webhook" class="page">
+    <h1 class="page-title">Webhook</h1>
+    <div class="settings-section" id="webhook-settings">
+        <div id="webhook-options"></div>
+    </div>
+    <div class="settings-actions">
+        <button class="btn" id="btn-save-webhook" onclick="saveConfig()">Save Settings</button>
+    </div>
+</div>
+
 <!-- ── Processing Log ──────────────────────────────────────────────────── -->
 <div id="page-log" class="page">
     <h1 class="page-title">Processing Log</h1>
@@ -1624,7 +1643,7 @@ document.querySelectorAll('.nav-links a').forEach(a => {
         document.getElementById('page-' + page).classList.add('active');
 
         if (page === 'dashboard') { fetchStats(); fetchTimeSeries(); fetchLanguageIndex(); }
-        if (page === 'settings' && configOptions.length === 0) fetchConfig();
+        if ((page === 'settings' || page === 'webhook') && configOptions.length === 0) fetchConfig();
         if (page === 'log' && (logEntries.length === 0 || _logStale)) fetchLog();
     });
 });
@@ -2445,7 +2464,7 @@ async function saveConfig() {
 /* Advanced toggle */
 document.getElementById('toggle-advanced').addEventListener('change', function() {
     const display = this.checked ? 'block' : 'none';
-    ['advanced-settings', 'webhook-settings', 'maintenance-settings'].forEach(id => {
+    ['advanced-settings', 'maintenance-settings'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = display;
     });
@@ -3697,7 +3716,7 @@ fetchUpdateStatus();
    only flips on the change event). Force the state into sync here. */
 (function resetAdvancedToggle() {
     const toggle = document.getElementById('toggle-advanced');
-    const panels = ['advanced-settings', 'webhook-settings', 'maintenance-settings']
+    const panels = ['advanced-settings', 'maintenance-settings']
         .map(id => document.getElementById(id));
     const apply = () => {
         if (toggle) toggle.checked = false;

@@ -3,6 +3,7 @@
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote
 
 import requests
@@ -84,8 +85,14 @@ def _send(method: str, url: str, *, data, headers, auth, timeout) -> None:
         logger.warning("Webhook error for %s: %s", url, exc)
 
 
-def send_remux_webhook(config, new_path: Path, old_path: Path) -> None:
-    """Fire the configured webhook after a file has been remuxed.
+def send_remux_webhook(config, new_path: Path, old_path: Path,
+                       sent: Optional[set] = None) -> None:
+    """Fire the configured webhook after a file was remuxed or its
+    metadata was changed in place (then *new_path* == *old_path*).
+
+    *sent* is a per-run set of requests already made: an identical
+    request (same method, URL and body) is skipped, so a ``{dir}``-based
+    URL triggers one scan per folder instead of one per file.
 
     Fire-and-forget: the HTTP call runs on a daemon thread so a slow or
     unreachable endpoint never stalls the processing loop, and any error
@@ -127,6 +134,13 @@ def send_remux_webhook(config, new_path: Path, old_path: Path) -> None:
     user = getattr(config, "webhook_auth_user", "") or ""
     if user:
         auth = (user, getattr(config, "webhook_auth_pass", "") or "")
+
+    if sent is not None:
+        key = (method, url, data)
+        if key in sent:
+            logger.debug("Webhook already sent this run, skipping: %s", url)
+            return
+        sent.add(key)
 
     try:
         timeout = int(getattr(config, "webhook_timeout_seconds", 10) or 10)

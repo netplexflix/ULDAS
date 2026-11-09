@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from uldas import mp4 as mp4_mod
+from uldas import webhook
 from uldas.language_index import (
     LanguageIndex,
     _key_outside,
@@ -99,6 +100,7 @@ def relabel_audio_language(
         logger.info("Nothing to relabel. Files processed by older ULDAS "
                     "versions only appear after running Index languages.")
 
+    webhook_sent: set = set()  # identical requests go out once per run
     try:
         for n, fp in enumerate(files, 1):
             if cancel_check is not None and cancel_check():
@@ -139,6 +141,14 @@ def relabel_audio_language(
                 continue
             stats["files_changed"] += 1
             stats["tracks_changed"] += len(targets)
+
+            if getattr(config, "webhook_enabled", False):
+                try:
+                    webhook.send_remux_webhook(config, fp, fp,
+                                               sent=webhook_sent)
+                except Exception as exc:
+                    logger.warning("Webhook dispatch failed for %s: %s",
+                                   fp, exc)
 
             if tracker is not None and tracker.get_entry(fp):
                 tracker.merge_audio_relabel(

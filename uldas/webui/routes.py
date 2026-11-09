@@ -417,13 +417,13 @@ CONFIG_OPTIONS = [
         "description": "Subtitle count above this value = likely full subtitles.",
         "advanced": True,
     },
-    # ── Webhook (fire after remux) ────────────────────────────────────────
+    # ── Webhook (fire after a file changes) ───────────────────────────────
     {
         "key": "webhook_enabled",
         "type": "bool",
         "default": False,
         "label": "Enabled",
-        "description": "Send an HTTP request after a file is remuxed (e.g. to trigger a targeted Plex/Jellyfin scan via autoscan, autopulse, etc.).",
+        "description": "Send an HTTP request whenever ULDAS changes a file (remux, audio/subtitle language or subtitle flag edits, Change audio language tag runs), e.g. to trigger a targeted Plex/Jellyfin scan via autoscan, autopulse, etc. Identical requests are sent once per run, so a {dir} URL triggers one scan per folder.",
         "section": "webhook",
         "advanced": True,
     },
@@ -442,7 +442,7 @@ CONFIG_OPTIONS = [
         "type": "string",
         "default": "",
         "label": "URL",
-        "description": "Target URL. Most scan tools take the file path in the query string here (e.g. ?path={path_enc} or ?dir={dir_enc}). Variables: {path}/{path_enc} (remuxed file), {dir}/{dir_enc} (folder), {filename}, {name_noext}, {old_path}/{old_path_enc}. Use the _enc variants inside a query string.",
+        "description": "Target URL. Most scan tools take the file path in the query string here (e.g. ?path={path_enc} or ?dir={dir_enc}). Variables: {path}/{path_enc} (the changed file), {dir}/{dir_enc} (folder), {filename}, {name_noext}, {old_path}/{old_path_enc} (the original file before a remux; the same file for in-place edits). Use the _enc variants inside a query string.",
         "section": "webhook",
         "advanced": True,
     },

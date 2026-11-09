@@ -135,6 +135,9 @@ class MKVLanguageDetector:
         self.last_remux_error: Optional[str] = None
         self._cancel_check = cancel_check
         self._cancel_logged = False
+        # Webhook requests already sent this run (the detector is rebuilt
+        # per run), so identical {dir}-based calls go out once per folder.
+        self._webhook_sent: set = set()
 
         # Per-file metadata caches, cleared at the start of each
         # process_file() call.  ffprobe/mkvmerge are expensive enough
@@ -1885,19 +1888,9 @@ class MKVLanguageDetector:
                 cached_key = key_cache.get(str(fp))
                 res = self.process_file(fp, _cached_key=cached_key)
                 results.append(res)
-                # Notify external scan tools once the remuxed file is fully processed (language tags already re-applied above).
-                if (res.get("was_remuxed") and not self.config.dry_run
-                        and getattr(self.config, "webhook_enabled", False)):
-                    try:
-                        from uldas import webhook
-                        webhook.send_remux_webhook(
-                            self.config,
-                            Path(res["mkv_file"]),
-                            Path(res["original_file"]),
-                        )
-                    except Exception as exc:
-                        logger.warning("Webhook dispatch failed for %s: %s",
-                                       fp, exc)
+                # Notify external scan tools once the file is fully
+                # processed (all tags written).
+                self._notify_webhook(res)
             except Exception as exc:
                 logger.error("Error processing %s: %s", fp, exc)
                 results.append({
@@ -1917,6 +1910,28 @@ class MKVLanguageDetector:
                     self.language_index.save_if_dirty()
 
         return results
+
+    def _notify_webhook(self, res: Dict) -> None:
+        """Fire the scan webhook if this file was changed on disk: a remux,
+        or any audio / subtitle track written in place."""
+        cfg = self.config
+        if cfg.dry_run or not getattr(cfg, "webhook_enabled", False):
+            return
+        sub_res = res.get("subtitle_results") or {}
+        if res.get("was_remuxed"):
+            new_path = Path(res["mkv_file"])
+            old_path = Path(res["original_file"])
+        elif (res.get("processed_tracks")
+                or sub_res.get("processed_subtitle_tracks")):
+            new_path = old_path = Path(res["mkv_file"])
+        else:
+            return
+        try:
+            from uldas import webhook
+            webhook.send_remux_webhook(cfg, new_path, old_path,
+                                       sent=self._webhook_sent)
+        except Exception as exc:
+            logger.warning("Webhook dispatch failed for %s: %s", new_path, exc)
 
     def _process_ext_sub_files(self, ext_sub_files: List[Path]) -> List[Dict]:
         """Process a list of external subtitle files."""
