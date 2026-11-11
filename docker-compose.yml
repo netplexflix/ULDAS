@@ -25,7 +25,8 @@ services:
     # Optional: NVIDIA GPU acceleration. Requires the NVIDIA Container Toolkit
     # to be installed on the host first (Unraid: the "Nvidia-Driver" plugin):
     # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-    # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
+    # Without this ULDAS runs on CPU. For an Intel GPU (Arc, Iris Xe, UHD) use
+    # the :intel image and pass /dev/dri instead; see "Intel GPU" in the README.
     # deploy:
     #   resources:
     #     reservations:
@@ -33,4 +34,7 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+    # Optional: Intel GPU acceleration (image netplexflix/uldas:intel)
+    # devices:
+    #   - /dev/dri:/dev/dri
     restart: unless-stopped  # use "no" together with `command: --once` for a single run

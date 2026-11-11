@@ -1,0 +1,91 @@
+# Intel GPU variant (Arc, Iris Xe, UHD): Whisper runs on OpenVINO instead of
+# CTranslate2/CUDA. Debian trixie ships an Intel compute runtime new enough
+# for Arc (DG2) and Meteor/Lunar Lake iGPUs.
+FROM python:3.11-slim-trixie
+
+LABEL maintainer="netplexflix"
+LABEL description="ULDAS - Unified Language Detection and Subtitle Processing (Intel GPU via OpenVINO with CPU fallback)"
+LABEL org.opencontainers.image.source="https://github.com/netplexflix/ULDAS"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+# Runtime-only system deps. All Python packages ship prebuilt wheels, so no
+# compiler or -dev headers are needed. libgomp1 is required by the ctranslate2
+# wheel on slim images.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    xz-utils \
+    mkvtoolnix \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    gosu \
+    tzdata \
+    libgomp1 \
+    ocl-icd-libopencl1 \
+    libze1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Intel GPU compute runtime (OpenCL + Level Zero) and graphics compiler from
+# Intel's GitHub releases; Debian trixie does not ship them. Bump the versions
+# together, following the compute-runtime release notes.
+ARG COMPUTE_RUNTIME=26.35.39758.10
+ARG GMMLIB=22.10.0
+ARG IGC=2.41.5
+ARG IGC_BUILD=22716
+RUN set -eux; mkdir /tmp/neo; cd /tmp/neo; \
+    CR=https://github.com/intel/compute-runtime/releases/download/$COMPUTE_RUNTIME; \
+    IGCURL=https://github.com/intel/intel-graphics-compiler/releases/download/v$IGC; \
+    curl -fsSLO "$IGCURL/intel-igc-core-2_${IGC}+${IGC_BUILD}_amd64.deb"; \
+    curl -fsSLO "$IGCURL/intel-igc-opencl-2_${IGC}+${IGC_BUILD}_amd64.deb"; \
+    curl -fsSLO "$CR/intel-opencl-icd_${COMPUTE_RUNTIME}-0_amd64.deb"; \
+    curl -fsSLO "$CR/libze-intel-gpu1_${COMPUTE_RUNTIME}-0_amd64.deb"; \
+    curl -fsSLO "$CR/libigdgmm12_${GMMLIB}_amd64.deb"; \
+    curl -fsSL "$CR/ww$(echo $COMPUTE_RUNTIME | cut -d. -f2).sum" | grep -E "intel-opencl-icd_|libze-intel-gpu1_|libigdgmm12_" | grep -v dbgsym | sed "s/ /  /" | sha256sum -c -; \
+    apt-get update; apt-get install -y --no-install-recommends ./*.deb; \
+    apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/neo
+
+# Install a patched static FFmpeg (>= 8.1.2) to fix CVE-2026-8461.
+# Release-branch build (8.1.x fixes only), not the development master.
+ARG FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz
+RUN curl -fsSL -o /tmp/ffmpeg.tar.xz "$FFMPEG_URL" \
+    && mkdir -p /tmp/ffmpeg \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 \
+    && install -m 0755 /tmp/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && install -m 0755 /tmp/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ffmpeg /tmp/ffmpeg.tar.xz \
+    && /usr/local/bin/ffmpeg -version | head -n1
+
+WORKDIR /app
+
+# Python dependencies. faster-whisper stays installed for audio decoding, VAD
+# and the CPU fallback; the OpenVINO runtime runs Whisper on the Intel GPU.
+# No CUDA libraries and no PyTorch are needed.
+COPY requirements.txt requirements-intel.txt ./
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt -r requirements-intel.txt
+
+# Copy application code
+COPY ULDAS.py .
+COPY uldas ./uldas
+
+# Create directories and copy config
+RUN mkdir -p /app/config /media
+COPY config/config.example.yml /app/config.example.yml
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Keep the Whisper model cache on the config volume so it survives container
+# recreation instead of living in the writable layer.
+ENV HF_HOME=/app/config/.cache/huggingface
+
+ENV PUID=0
+ENV PGID=0
+
+EXPOSE 2119
+
+ENTRYPOINT ["/entrypoint.sh"]
