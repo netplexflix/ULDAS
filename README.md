@@ -33,6 +33,7 @@ Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [langdetect](h
     - [Step 6: Run ULDAS](#step-6-run)
     - [Unraid](#unraid)
     - [NVIDIA GPU](#nvidia-gpu)
+    - [Intel GPU](#intel-gpu)
 - [⚙️ Configuration](#configuration)
   - [Expert variables](#expert-variables)
   - [Model Size Guide](#model-size-guide)
@@ -108,7 +109,8 @@ services:
     # Optional: NVIDIA GPU acceleration. Requires the NVIDIA Container Toolkit
     # to be installed on the host first (Unraid: the "Nvidia-Driver" plugin):
     # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-    # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
+    # Without this ULDAS runs on CPU. For an Intel GPU (Arc, Iris Xe, UHD) use
+    # the :intel image and pass /dev/dri instead; see "Intel GPU" in the README.
     # deploy:
     #   resources:
     #     reservations:
@@ -116,11 +118,14 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+    # Optional: Intel GPU acceleration (image netplexflix/uldas:intel)
+    # devices:
+    #   - /dev/dri:/dev/dri
     restart: unless-stopped  # use "no" together with `command: --once` for a single run
 ```
 
 > [!NOTE]
-> **GPU support:** ULDAS uses an NVIDIA GPU automatically when one is made available to the container; otherwise it runs on CPU. See [NVIDIA GPU](#nvidia-gpu) below.
+> **GPU support:** ULDAS uses an NVIDIA GPU automatically when one is made available to the container; otherwise it runs on CPU. See [NVIDIA GPU](#nvidia-gpu) below. Intel GPUs are supported by the separate `:intel` image, see [Intel GPU](#intel-gpu).
 
 <a id="step-3-update"></a>
 #### Step 3: Update volumes, IDs, port and CRON Schedule
@@ -190,7 +195,7 @@ ULDAS is available in Community Applications. Search for "ULDAS" or install manu
 <a id="nvidia-gpu"></a>
 ### NVIDIA GPU
 
-ULDAS runs Whisper through CTranslate2, which supports **CPU and NVIDIA CUDA only**. Intel and AMD GPUs are not supported. With the default `device: auto`, ULDAS uses an NVIDIA GPU when one is available inside the container and otherwise runs on CPU; slower, but fully functional.
+ULDAS runs Whisper through CTranslate2, which supports **CPU and NVIDIA CUDA only**. Intel GPUs are supported through OpenVINO by the separate `:intel` image (see [Intel GPU](#intel-gpu)); AMD GPUs are not supported. With the default `device: auto`, ULDAS uses an NVIDIA GPU when one is available inside the container and otherwise runs on CPU; slower, but fully functional.
 
 **Making the GPU available is a host-side setting.** The NVIDIA container runtime injects the GPU driver into the container. Enable it as follows:
 
@@ -211,6 +216,23 @@ Hosts whose Docker daemon has `"default-runtime": "nvidia"` configured need noth
 | `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility` | Driver features to inject. `compute` is required for Whisper; `utility` provides `nvidia-smi` inside the container. Leave as is |
 
 **Verifying.** With `show_details: true`, the start of a run logs `Initializing faster-whisper: device=cuda, compute=float16, …`. `docker exec uldas nvidia-smi` should list your GPU. If you see `device=cpu` on an NVIDIA host, the runtime is not active; recheck the table above.
+
+<a id="intel-gpu"></a>
+### Intel GPU
+
+The `:intel` image (built from `Dockerfile.intel`) runs Whisper on Intel GPUs — Arc (A-/B-series), Iris Xe and recent UHD iGPUs — through [OpenVINO](https://github.com/openvinotoolkit/openvino). It uses the OpenVINO exports of the same Whisper checkpoints (`OpenVINO/whisper-<model>-<precision>-ov` on Hugging Face), downloaded on first use like the regular models. Language detection and the hallucination check work exactly as on CPU/CUDA. It needs no NVIDIA runtime and no PyTorch, and still falls back to CPU (faster-whisper) when no Intel GPU is usable.
+
+| Platform | What to do |
+| --- | --- |
+| Docker Compose | Use `image: netplexflix/uldas:intel` and uncomment the `devices:` block in the compose example above |
+| `docker run` | Add `--device /dev/dri` |
+| Unraid | Add `--device=/dev/dri` to the container's **Extra Parameters** |
+
+With the default `device: auto`, ULDAS picks CUDA first, then an Intel GPU, then CPU; set `device: openvino` to require the Intel GPU (`openvino:GPU.1` selects a second GPU). `compute_type` picks the OpenVINO export: `auto`/`float16` → `fp16`, `int8` → `int8`, `int4` → `int4`. When `PUID`/`PGID` are set, the entrypoint adds the group(s) that own `/dev/dri` automatically, so no `group_add` is needed.
+
+**Verifying.** The start of a run logs `Whisper model 'small' running on OpenVINO GPU (OpenVINO/whisper-small-fp16-ov) – Intel(R) Arc(TM) …`. If it says `running on cpu`, check that `/dev/dri` exists inside the container.
+
+**Building it yourself:** `docker build -f Dockerfile.intel -t uldas:intel .`
 
 ***
 
@@ -239,7 +261,7 @@ Only Change these if you know what you're doing.
 - **vad_min_speech_duration_ms**: Minimum speech segment length (in milliseconds) to consider as valid speech (Default: 250)
 - **vad_max_speech_duration_s**: Maximum continuous speech segment length (in seconds) before splitting (Default: 30)
 - **whisper_model**: See Model Size Guide below
-- **device**: Hardware acceleration preference (auto, cpu, or cuda). Auto-detects CUDA GPU if available, falls back to CPU (Default: "auto")
+- **device**: Hardware acceleration preference (auto, cpu, cuda, or openvino). Auto uses an NVIDIA GPU if available, then an Intel GPU (`:intel` image), and falls back to CPU (Default: "auto")
 - **compute_type**: Precision/performance trade-off (auto, int8, float16, float32). Auto-selects optimal type based on device (Default: "auto")
 - **cpu_threads**: Number of CPU threads Whisper uses on CPU. 0 = all cores ULDAS is allowed to use (75% of the system's cores) (Default: 0)
 - **confidence_threshold**: Minimum Whisper language probability (0.0-1.0) for a single audio sample to be accepted immediately. Below it, the evidence of several samples spread over the runtime is pooled, and if that is still not convincing the entire audio track is analyzed. Tracks with no confident result are left as `und` and flagged *Inconclusive*. Higher values are more conservative but reduce false positives. (Default: 0.9)
@@ -395,7 +417,7 @@ External subtitle File Formats:
 
 | Flag | Description |
 | --- | --- |
-| `--device {auto,cpu,cuda}` | Device for Whisper inference |
+| `--device {auto,cpu,cuda,openvino}` | Device for Whisper inference (`openvino` = Intel GPU, `:intel` image) |
 | `--compute-type {auto,int8,int8_float16,int16,float16,float32}` | Compute type for Whisper inference |
 | `--cpu-threads N` | Number of CPU threads (`0` = auto) |
 

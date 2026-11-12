@@ -300,8 +300,8 @@ CONFIG_OPTIONS = [
         "type": "select",
         "default": "auto",
         "label": "Device",
-        "description": "Hardware acceleration preference. Auto-detects CUDA GPU if available, falls back to CPU.",
-        "options": ["auto", "cpu", "cuda"],
+        "description": "Hardware acceleration preference. Auto uses an NVIDIA GPU (cuda) if available, then an Intel GPU (openvino, :intel image only), and falls back to CPU.",
+        "options": ["auto", "cpu", "cuda", "openvino"],
         "advanced": True,
     },
     {

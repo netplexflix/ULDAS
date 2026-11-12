@@ -34,10 +34,28 @@ if [ "$PUID" != "0" ] && [ "$PGID" != "0" ]; then
         USER_NAME=$(getent passwd "$PUID" | cut -d: -f1)
     fi
 
+    # Intel GPU (/dev/dri): collect the render nodes' group ids so a non-root
+    # PUID can reach the GPU. gosu "uid:gid" keeps only the primary group, so
+    # Docker's --group-add / group_add would otherwise be dropped.
+    GPU_GIDS=""
+    for node in /dev/dri/renderD* /dev/dri/card*; do
+        [ -e "$node" ] || continue
+        NODE_GID=$(stat -c '%g' "$node")
+        case ",$PGID$GPU_GIDS," in *",$NODE_GID,"*) continue ;; esac
+        GPU_GIDS="$GPU_GIDS,$NODE_GID"
+    done
+
     # Create cache and log directories, set ownership
     mkdir -p /app/.cache /app/config/logs
     chown -R "$PUID:$PGID" /app/config /app/.cache
 
+    if [ -n "$GPU_GIDS" ]; then
+        echo "Running as $USER_NAME (PUID=$PUID, PGID=$PGID, GPU groups ${GPU_GIDS#,})"
+        HOME=$(getent passwd "$PUID" | cut -d: -f6)
+        export HOME
+        exec setpriv --reuid="$PUID" --regid="$PGID" --groups="$PGID$GPU_GIDS" \
+            python ULDAS.py "$@"
+    fi
     echo "Running as $USER_NAME (PUID=$PUID, PGID=$PGID)"
     exec gosu "$PUID:$PGID" python ULDAS.py "$@"
 else
