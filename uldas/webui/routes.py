@@ -10,6 +10,7 @@ from uldas.config import write_config_yaml
 from uldas.tracking import ProcessingTracker
 from uldas.constants import VERSION
 from uldas.updater import get_update_status
+from uldas.openvino_backend import is_intel_image, openvino_installed
 
 
 # ── Tracker cache ────────────────────────────────────────────────────────
@@ -124,6 +125,25 @@ _REPROCESS_FILES_MAX = 1000
 class _QuotedDumper(yaml.SafeDumper):
     """YAML dumper that always quotes string values."""
     pass
+
+
+def _apply_device_choices(entry: dict) -> None:
+    """Offer only the devices this install can run: 'cuda' needs the regular
+    image (CUDA libraries), 'openvino' the :intel image (openvino package)."""
+    cuda = not is_intel_image()
+    openvino = openvino_installed()
+    entry["options"] = (["auto", "cpu"] + (["cuda"] if cuda else [])
+                        + (["openvino"] if openvino else []))
+    if cuda and not openvino:
+        entry["description"] = (
+            "Hardware acceleration preference. Auto uses an NVIDIA GPU (cuda) "
+            "if available, otherwise CPU. Intel GPUs need the :intel image "
+            "(netplexflix/uldas:intel).")
+    elif openvino and not cuda:
+        entry["description"] = (
+            "Hardware acceleration preference. Auto uses an Intel GPU "
+            "(openvino) if available, otherwise CPU. NVIDIA GPUs need the "
+            "regular image (netplexflix/uldas:latest).")
 
 
 def _quoted_str(dumper, data):
@@ -727,6 +747,15 @@ def register_routes(app, scheduler_state=None):
         for opt in CONFIG_OPTIONS:
             entry = dict(opt)
             entry["value"] = config.get(opt["key"], opt["default"])
+            if opt["key"] == "device":
+                _apply_device_choices(entry)
+            if opt.get("type") == "select":
+                # Keep a hand-set value (e.g. 'openvino:GPU.1') selectable, so
+                # saving the settings doesn't silently reset it.
+                entry["options"] = list(entry["options"])
+                value = entry["value"]
+                if isinstance(value, str) and value and value not in entry["options"]:
+                    entry["options"].append(value)
             result.append(entry)
 
         return jsonify(result)

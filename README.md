@@ -261,7 +261,7 @@ Only Change these if you know what you're doing.
 - **vad_min_speech_duration_ms**: Minimum speech segment length (in milliseconds) to consider as valid speech (Default: 250)
 - **vad_max_speech_duration_s**: Maximum continuous speech segment length (in seconds) before splitting (Default: 30)
 - **whisper_model**: See Model Size Guide below
-- **device**: Hardware acceleration preference (auto, cpu, cuda, or openvino). Auto uses an NVIDIA GPU if available, then an Intel GPU (`:intel` image), and falls back to CPU (Default: "auto")
+- **device**: Hardware acceleration preference (auto, cpu, cuda, or openvino). `cuda` (NVIDIA GPU) needs the regular image, `openvino` (Intel GPU) the `:intel` image; the web UI only offers the one your image supports. Auto uses the GPU the image supports if one is available and falls back to CPU (Default: "auto")
 - **compute_type**: Precision/performance trade-off (auto, int8, float16, float32). Auto-selects optimal type based on device (Default: "auto")
 - **cpu_threads**: Number of CPU threads Whisper uses on CPU. 0 = all cores ULDAS is allowed to use (75% of the system's cores) (Default: 0)
 - **confidence_threshold**: Minimum Whisper language probability (0.0-1.0) for a single audio sample to be accepted immediately. Below it, the evidence of several samples spread over the runtime is pooled, and if that is still not convincing the entire audio track is analyzed. Tracks with no confident result are left as `und` and flagged *Inconclusive*. Higher values are more conservative but reduce false positives. (Default: 0.9)

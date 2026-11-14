@@ -15,6 +15,7 @@ PyTorch or transformers install is required.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -58,6 +59,20 @@ def openvino_target(device: str) -> str:
     """``openvino`` / ``intel`` -> ``GPU``; ``openvino:GPU.1`` -> ``GPU.1``."""
     _, _, target = (device or "").partition(":")
     return target.upper() if target else "GPU"
+
+
+def openvino_installed() -> bool:
+    """True when the ``openvino`` package is installed (the ``:intel`` image).
+    Checked without importing it."""
+    try:
+        return importlib.util.find_spec("openvino") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def is_intel_image() -> bool:
+    """True inside the ``:intel`` Docker image, which has no CUDA libraries."""
+    return os.environ.get("ULDAS_IMAGE", "").lower() == "intel"
 
 
 def openvino_gpu_available() -> Optional[str]:

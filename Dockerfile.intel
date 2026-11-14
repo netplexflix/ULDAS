@@ -83,6 +83,10 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 # recreation instead of living in the writable layer.
 ENV HF_HOME=/app/config/.cache/huggingface
 
+# Tells the app it runs in the Intel image (no CUDA libraries), so the web UI
+# offers 'openvino' instead of 'cuda' as device.
+ENV ULDAS_IMAGE=intel
+
 ENV PUID=0
 ENV PGID=0
 

@@ -14,8 +14,9 @@ from typing import Callable, List, Dict, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
-from .openvino_backend import (OpenVINOWhisper, is_openvino_device,
-                               openvino_gpu_available, openvino_target)
+from .openvino_backend import (OpenVINOWhisper, is_intel_image, is_openvino_device,
+                               openvino_gpu_available, openvino_installed,
+                               openvino_target)
 
 from uldas.config import Config
 from uldas.constants import (
@@ -269,6 +270,13 @@ class MKVLanguageDetector:
             if model is not None:
                 return model
             device, compute_type = "cpu", "int8"
+        elif device == "cuda" and is_intel_image():
+            # The :intel image ships no CUDA libraries; say so instead of
+            # failing twice with library errors.
+            logger.warning("CUDA (NVIDIA GPU) needs the regular ULDAS image "
+                           "(netplexflix/uldas:latest), not the :intel image "
+                           "– using cpu/int8")
+            device, compute_type = "cpu", "int8"
 
         attempts = [(device, compute_type)]
         if device == "cuda" and compute_type != "int8":
@@ -309,6 +317,10 @@ class MKVLanguageDetector:
         """Load Whisper on an Intel GPU through OpenVINO, or return None so
         the caller falls back to faster-whisper on CPU."""
         target = openvino_target(device)
+        if not openvino_installed():
+            logger.warning("device '%s' (Intel GPU) needs the ULDAS Intel image "
+                           "(netplexflix/uldas:intel) – using cpu/int8", device)
+            return None
         try:
             model = OpenVINOWhisper(
                 self.config.whisper_model,
@@ -395,12 +407,14 @@ class MKVLanguageDetector:
             return self.config.device
         # CTranslate2 (faster-whisper) handles CPU and NVIDIA CUDA, so ask it
         # first. Any failure (missing driver libs, no NVIDIA runtime) → next.
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                return "cuda"
-        except Exception:
-            pass
+        # The :intel image has no CUDA libraries, so it skips this step.
+        if not is_intel_image():
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() > 0:
+                    return "cuda"
+            except Exception:
+                pass
         # No NVIDIA GPU: use an Intel GPU through OpenVINO when the openvino
         # package and the GPU's compute runtime are present (":intel" image).
         if openvino_gpu_available():
