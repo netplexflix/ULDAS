@@ -144,8 +144,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Maximum speech duration in seconds for VAD (config: vad_max_speech_duration_s)")
 
     # ── Device / compute ─────────────────────────────────────────────────
-    p.add_argument("--device", choices=["auto", "cpu", "cuda"],
-                   help="Device for Whisper inference (config: device)")
+    p.add_argument("--device", choices=["auto", "cpu", "cuda", "openvino"],
+                   help="Device for Whisper inference; cuda = NVIDIA GPU (regular image), "
+                        "openvino = Intel GPU (:intel image only) (config: device)")
     p.add_argument("--compute-type",
                    choices=["auto", "int8", "int8_float16", "int16", "float16", "float32"],
                    help="Compute type for Whisper inference (config: compute_type)")

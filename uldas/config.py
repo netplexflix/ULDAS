@@ -100,7 +100,7 @@ class Config:
         # ── Timeouts ─────────────────────────────────────────────────────
         self.operation_timeout_seconds: int = 600
 
-        # ── Webhook (fire after remux) ───────────────────────────────────
+        # ── Webhook (fire after a file changes) ──────────────────────────
         self.webhook_enabled: bool = False
         self.webhook_preset: str = "custom"  # custom | autoscan | autopulse (UI only)
         self.webhook_url: str = ""

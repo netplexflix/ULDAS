@@ -10,6 +10,7 @@ from uldas.config import write_config_yaml
 from uldas.tracking import ProcessingTracker
 from uldas.constants import VERSION
 from uldas.updater import get_update_status
+from uldas.openvino_backend import is_intel_image, openvino_installed
 
 
 # ── Tracker cache ────────────────────────────────────────────────────────
@@ -124,6 +125,25 @@ _REPROCESS_FILES_MAX = 1000
 class _QuotedDumper(yaml.SafeDumper):
     """YAML dumper that always quotes string values."""
     pass
+
+
+def _apply_device_choices(entry: dict) -> None:
+    """Offer only the devices this install can run: 'cuda' needs the regular
+    image (CUDA libraries), 'openvino' the :intel image (openvino package)."""
+    cuda = not is_intel_image()
+    openvino = openvino_installed()
+    entry["options"] = (["auto", "cpu"] + (["cuda"] if cuda else [])
+                        + (["openvino"] if openvino else []))
+    if cuda and not openvino:
+        entry["description"] = (
+            "Hardware acceleration preference. Auto uses an NVIDIA GPU (cuda) "
+            "if available, otherwise CPU. Intel GPUs need the :intel image "
+            "(netplexflix/uldas:intel).")
+    elif openvino and not cuda:
+        entry["description"] = (
+            "Hardware acceleration preference. Auto uses an Intel GPU "
+            "(openvino) if available, otherwise CPU. NVIDIA GPUs need the "
+            "regular image (netplexflix/uldas:latest).")
 
 
 def _quoted_str(dumper, data):
@@ -300,8 +320,8 @@ CONFIG_OPTIONS = [
         "type": "select",
         "default": "auto",
         "label": "Device",
-        "description": "Hardware acceleration preference. Auto-detects CUDA GPU if available, falls back to CPU.",
-        "options": ["auto", "cpu", "cuda"],
+        "description": "Hardware acceleration preference. Auto uses an NVIDIA GPU (cuda) if available, then an Intel GPU (openvino, :intel image only), and falls back to CPU.",
+        "options": ["auto", "cpu", "cuda", "openvino"],
         "advanced": True,
     },
     {
@@ -417,13 +437,13 @@ CONFIG_OPTIONS = [
         "description": "Subtitle count above this value = likely full subtitles.",
         "advanced": True,
     },
-    # ── Webhook (fire after remux) ────────────────────────────────────────
+    # ── Webhook (fire after a file changes) ───────────────────────────────
     {
         "key": "webhook_enabled",
         "type": "bool",
         "default": False,
         "label": "Enabled",
-        "description": "Send an HTTP request after a file is remuxed (e.g. to trigger a targeted Plex/Jellyfin scan via autoscan, autopulse, etc.).",
+        "description": "Send an HTTP request whenever ULDAS changes a file (remux, audio/subtitle language or subtitle flag edits, Change audio language tag runs), e.g. to trigger a targeted Plex/Jellyfin scan via autoscan, autopulse, etc. Identical requests are sent once per run, so a {dir} URL triggers one scan per folder.",
         "section": "webhook",
         "advanced": True,
     },
@@ -442,7 +462,7 @@ CONFIG_OPTIONS = [
         "type": "string",
         "default": "",
         "label": "URL",
-        "description": "Target URL. Most scan tools take the file path in the query string here (e.g. ?path={path_enc} or ?dir={dir_enc}). Variables: {path}/{path_enc} (remuxed file), {dir}/{dir_enc} (folder), {filename}, {name_noext}, {old_path}/{old_path_enc}. Use the _enc variants inside a query string.",
+        "description": "Target URL. Most scan tools take the file path in the query string here (e.g. ?path={path_enc} or ?dir={dir_enc}). Variables: {path}/{path_enc} (the changed file), {dir}/{dir_enc} (folder), {filename}, {name_noext}, {old_path}/{old_path_enc} (the original file before a remux; the same file for in-place edits). Use the _enc variants inside a query string.",
         "section": "webhook",
         "advanced": True,
     },
@@ -727,6 +747,15 @@ def register_routes(app, scheduler_state=None):
         for opt in CONFIG_OPTIONS:
             entry = dict(opt)
             entry["value"] = config.get(opt["key"], opt["default"])
+            if opt["key"] == "device":
+                _apply_device_choices(entry)
+            if opt.get("type") == "select":
+                # Keep a hand-set value (e.g. 'openvino:GPU.1') selectable, so
+                # saving the settings doesn't silently reset it.
+                entry["options"] = list(entry["options"])
+                value = entry["value"]
+                if isinstance(value, str) and value and value not in entry["options"]:
+                    entry["options"].append(value)
             result.append(entry)
 
         return jsonify(result)

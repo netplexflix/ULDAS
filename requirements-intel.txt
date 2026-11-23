@@ -1,0 +1,2 @@
+# Extra Python packages for the Intel GPU image (Dockerfile.intel)
+openvino>=2025.3

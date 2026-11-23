@@ -14,6 +14,10 @@ from typing import Callable, List, Dict, Optional, Tuple
 
 from faster_whisper import WhisperModel
 
+from .openvino_backend import (OpenVINOWhisper, is_intel_image, is_openvino_device,
+                               openvino_gpu_available, openvino_installed,
+                               openvino_target)
+
 from uldas.config import Config
 from uldas.constants import (
     LANGUAGE_CODES, EXTERNAL_SUBTITLE_EXTENSIONS, MP4_EXTENSIONS,
@@ -135,6 +139,9 @@ class MKVLanguageDetector:
         self.last_remux_error: Optional[str] = None
         self._cancel_check = cancel_check
         self._cancel_logged = False
+        # Webhook requests already sent this run (the detector is rebuilt
+        # per run), so identical {dir}-based calls go out once per folder.
+        self._webhook_sent: set = set()
 
         # Per-file metadata caches, cleared at the start of each
         # process_file() call.  ffprobe/mkvmerge are expensive enough
@@ -258,6 +265,19 @@ class MKVLanguageDetector:
     def _load_whisper(self, device, compute_type, cpu_threads):
         # Requested setup first; on a GPU failure try CUDA int8 (works on
         # cards without float16 support) before falling back to CPU int8.
+        if is_openvino_device(device):
+            model = self._load_openvino(device, compute_type)
+            if model is not None:
+                return model
+            device, compute_type = "cpu", "int8"
+        elif device == "cuda" and is_intel_image():
+            # The :intel image ships no CUDA libraries; say so instead of
+            # failing twice with library errors.
+            logger.warning("CUDA (NVIDIA GPU) needs the regular ULDAS image "
+                           "(netplexflix/uldas:latest), not the :intel image "
+                           "– using cpu/int8")
+            device, compute_type = "cpu", "int8"
+
         attempts = [(device, compute_type)]
         if device == "cuda" and compute_type != "int8":
             attempts.append(("cuda", "int8"))
@@ -292,6 +312,35 @@ class MKVLanguageDetector:
                 print(msg, flush=True)
             return model
         raise last_exc
+
+    def _load_openvino(self, device, compute_type):
+        """Load Whisper on an Intel GPU through OpenVINO, or return None so
+        the caller falls back to faster-whisper on CPU."""
+        target = openvino_target(device)
+        if not openvino_installed():
+            logger.warning("device '%s' (Intel GPU) needs the ULDAS Intel image "
+                           "(netplexflix/uldas:intel) – using cpu/int8", device)
+            return None
+        try:
+            model = OpenVINOWhisper(
+                self.config.whisper_model,
+                device=target,
+                compute_type=compute_type,
+                cache_dir=os.environ.get("ULDAS_OPENVINO_CACHE",
+                                         os.path.join(os.environ.get("HF_HOME", "."),
+                                                      "openvino-cache")),
+            )
+        except Exception as exc:
+            logger.warning("OpenVINO Whisper init on %s failed (%s) – trying cpu/int8",
+                           target, exc)
+            return None
+        msg = (f"Whisper model '{self.config.whisper_model}' running on OpenVINO "
+               f"{target} ({model.repo}) – {model.device_name}")
+        if self.config.show_details:
+            logger.info(msg)
+        else:
+            print(msg, flush=True)
+        return model
 
     def _find_stub_model_cache(self) -> Optional[Path]:
         """Return the Hugging Face cache dir of the configured model if its
@@ -356,19 +405,27 @@ class MKVLanguageDetector:
     def _determine_device(self):
         if self.config.device != "auto":
             return self.config.device
-        # CTranslate2 is the inference backend (CPU / CUDA only), so ask it
-        # directly. Any failure (missing driver libs, no NVIDIA runtime) → CPU.
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                return "cuda"
-        except Exception:
-            pass
+        # CTranslate2 (faster-whisper) handles CPU and NVIDIA CUDA, so ask it
+        # first. Any failure (missing driver libs, no NVIDIA runtime) → next.
+        # The :intel image has no CUDA libraries, so it skips this step.
+        if not is_intel_image():
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() > 0:
+                    return "cuda"
+            except Exception:
+                pass
+        # No NVIDIA GPU: use an Intel GPU through OpenVINO when the openvino
+        # package and the GPU's compute runtime are present (":intel" image).
+        if openvino_gpu_available():
+            return "openvino"
         return "cpu"
 
     def _determine_compute_type(self, device):
         if self.config.compute_type != "auto":
             return self.config.compute_type
+        if is_openvino_device(device):
+            return "float16"
         if device != "cuda":
             return "int8"
         # float16 needs compute capability >= 7.0; Pascal cards (GTX 10xx,
@@ -1885,19 +1942,9 @@ class MKVLanguageDetector:
                 cached_key = key_cache.get(str(fp))
                 res = self.process_file(fp, _cached_key=cached_key)
                 results.append(res)
-                # Notify external scan tools once the remuxed file is fully processed (language tags already re-applied above).
-                if (res.get("was_remuxed") and not self.config.dry_run
-                        and getattr(self.config, "webhook_enabled", False)):
-                    try:
-                        from uldas import webhook
-                        webhook.send_remux_webhook(
-                            self.config,
-                            Path(res["mkv_file"]),
-                            Path(res["original_file"]),
-                        )
-                    except Exception as exc:
-                        logger.warning("Webhook dispatch failed for %s: %s",
-                                       fp, exc)
+                # Notify external scan tools once the file is fully
+                # processed (all tags written).
+                self._notify_webhook(res)
             except Exception as exc:
                 logger.error("Error processing %s: %s", fp, exc)
                 results.append({
@@ -1917,6 +1964,28 @@ class MKVLanguageDetector:
                     self.language_index.save_if_dirty()
 
         return results
+
+    def _notify_webhook(self, res: Dict) -> None:
+        """Fire the scan webhook if this file was changed on disk: a remux,
+        or any audio / subtitle track written in place."""
+        cfg = self.config
+        if cfg.dry_run or not getattr(cfg, "webhook_enabled", False):
+            return
+        sub_res = res.get("subtitle_results") or {}
+        if res.get("was_remuxed"):
+            new_path = Path(res["mkv_file"])
+            old_path = Path(res["original_file"])
+        elif (res.get("processed_tracks")
+                or sub_res.get("processed_subtitle_tracks")):
+            new_path = old_path = Path(res["mkv_file"])
+        else:
+            return
+        try:
+            from uldas import webhook
+            webhook.send_remux_webhook(cfg, new_path, old_path,
+                                       sent=self._webhook_sent)
+        except Exception as exc:
+            logger.warning("Webhook dispatch failed for %s: %s", new_path, exc)
 
     def _process_ext_sub_files(self, ext_sub_files: List[Path]) -> List[Dict]:
         """Process a list of external subtitle files."""

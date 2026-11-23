@@ -33,11 +33,12 @@ Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [langdetect](h
     - [Step 6: Run ULDAS](#step-6-run)
     - [Unraid](#unraid)
     - [NVIDIA GPU](#nvidia-gpu)
+    - [Intel GPU](#intel-gpu)
 - [⚙️ Configuration](#configuration)
   - [Expert variables](#expert-variables)
   - [Model Size Guide](#model-size-guide)
 - [🌐 WebUI](#webui)
-- [🔔 Webhook on Remux](#webhook-on-remux)
+- [🔔 Webhook](#webhook-on-remux)
 - [📄 Supported File Formats](#supported-file-formats)
 - [⌨️ CLI Reference](#cli-reference)
   - [Utility Commands](#utility-commands)
@@ -93,10 +94,6 @@ services:
       #   "0 5 * * 5"    = every Friday at 5:00 AM
       # Alternative: use a simple hours interval instead of cron:
       # - SCHEDULE_HOURS=24
-      # To run once and exit instead of on a schedule, add `command: --once`
-      # and set `restart: "no"` (with `unless-stopped` Docker restarts the
-      # container, and the run, after every exit). Removing the scheduler env
-      # vars is not enough once a schedule has been saved to config.yml.
       #
       # NOTE: CRON_SCHEDULE / SCHEDULE_HOURS are only used as initial defaults
       # on first launch. Once saved to config.yml they can be edited live from
@@ -112,7 +109,8 @@ services:
     # Optional: NVIDIA GPU acceleration. Requires the NVIDIA Container Toolkit
     # to be installed on the host first (Unraid: the "Nvidia-Driver" plugin):
     # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-    # Without this ULDAS runs on CPU. Intel/AMD GPUs are not supported.
+    # Without this ULDAS runs on CPU. For an Intel GPU (Arc, Iris Xe, UHD) use
+    # the :intel image and pass /dev/dri instead; see "Intel GPU" in the README.
     # deploy:
     #   resources:
     #     reservations:
@@ -120,11 +118,14 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+    # Optional: Intel GPU acceleration (image netplexflix/uldas:intel)
+    # devices:
+    #   - /dev/dri:/dev/dri
     restart: unless-stopped  # use "no" together with `command: --once` for a single run
 ```
 
 > [!NOTE]
-> **GPU support:** ULDAS uses an NVIDIA GPU automatically when one is made available to the container; otherwise it runs on CPU. See [NVIDIA GPU](#nvidia-gpu) below.
+> **GPU support:** ULDAS uses an NVIDIA GPU automatically when one is made available to the container; otherwise it runs on CPU. See [NVIDIA GPU](#nvidia-gpu) below. Intel GPUs are supported by the separate `:intel` image, see [Intel GPU](#intel-gpu).
 
 <a id="step-3-update"></a>
 #### Step 3: Update volumes, IDs, port and CRON Schedule
@@ -194,7 +195,7 @@ ULDAS is available in Community Applications. Search for "ULDAS" or install manu
 <a id="nvidia-gpu"></a>
 ### NVIDIA GPU
 
-ULDAS runs Whisper through CTranslate2, which supports **CPU and NVIDIA CUDA only**. Intel and AMD GPUs are not supported. With the default `device: auto`, ULDAS uses an NVIDIA GPU when one is available inside the container and otherwise runs on CPU; slower, but fully functional.
+ULDAS runs Whisper through CTranslate2, which supports **CPU and NVIDIA CUDA only**. Intel GPUs are supported through OpenVINO by the separate `:intel` image (see [Intel GPU](#intel-gpu)); AMD GPUs are not supported. With the default `device: auto`, ULDAS uses an NVIDIA GPU when one is available inside the container and otherwise runs on CPU; slower, but fully functional.
 
 **Making the GPU available is a host-side setting.** The NVIDIA container runtime injects the GPU driver into the container. Enable it as follows:
 
@@ -215,6 +216,23 @@ Hosts whose Docker daemon has `"default-runtime": "nvidia"` configured need noth
 | `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility` | Driver features to inject. `compute` is required for Whisper; `utility` provides `nvidia-smi` inside the container. Leave as is |
 
 **Verifying.** With `show_details: true`, the start of a run logs `Initializing faster-whisper: device=cuda, compute=float16, …`. `docker exec uldas nvidia-smi` should list your GPU. If you see `device=cpu` on an NVIDIA host, the runtime is not active; recheck the table above.
+
+<a id="intel-gpu"></a>
+### Intel GPU
+
+The `:intel` image (built from `Dockerfile.intel`) runs Whisper on Intel GPUs — Arc (A-/B-series), Iris Xe and recent UHD iGPUs — through [OpenVINO](https://github.com/openvinotoolkit/openvino). It uses the OpenVINO exports of the same Whisper checkpoints (`OpenVINO/whisper-<model>-<precision>-ov` on Hugging Face), downloaded on first use like the regular models. Language detection and the hallucination check work exactly as on CPU/CUDA. It needs no NVIDIA runtime and no PyTorch, and still falls back to CPU (faster-whisper) when no Intel GPU is usable.
+
+| Platform | What to do |
+| --- | --- |
+| Docker Compose | Use `image: netplexflix/uldas:intel` and uncomment the `devices:` block in the compose example above |
+| `docker run` | Add `--device /dev/dri` |
+| Unraid | Add `--device=/dev/dri` to the container's **Extra Parameters** |
+
+With the default `device: auto`, ULDAS picks CUDA first, then an Intel GPU, then CPU; set `device: openvino` to require the Intel GPU (`openvino:GPU.1` selects a second GPU). `compute_type` picks the OpenVINO export: `auto`/`float16` → `fp16`, `int8` → `int8`, `int4` → `int4`. When `PUID`/`PGID` are set, the entrypoint adds the group(s) that own `/dev/dri` automatically, so no `group_add` is needed.
+
+**Verifying.** The start of a run logs `Whisper model 'small' running on OpenVINO GPU (OpenVINO/whisper-small-fp16-ov) – Intel(R) Arc(TM) …`. If it says `running on cpu`, check that `/dev/dri` exists inside the container.
+
+**Building it yourself:** `docker build -f Dockerfile.intel -t uldas:intel .`
 
 ***
 
@@ -243,7 +261,7 @@ Only Change these if you know what you're doing.
 - **vad_min_speech_duration_ms**: Minimum speech segment length (in milliseconds) to consider as valid speech (Default: 250)
 - **vad_max_speech_duration_s**: Maximum continuous speech segment length (in seconds) before splitting (Default: 30)
 - **whisper_model**: See Model Size Guide below
-- **device**: Hardware acceleration preference (auto, cpu, or cuda). Auto-detects CUDA GPU if available, falls back to CPU (Default: "auto")
+- **device**: Hardware acceleration preference (auto, cpu, cuda, or openvino). `cuda` (NVIDIA GPU) needs the regular image, `openvino` (Intel GPU) the `:intel` image; the web UI only offers the one your image supports. Auto uses the GPU the image supports if one is available and falls back to CPU (Default: "auto")
 - **compute_type**: Precision/performance trade-off (auto, int8, float16, float32). Auto-selects optimal type based on device (Default: "auto")
 - **cpu_threads**: Number of CPU threads Whisper uses on CPU. 0 = all cores ULDAS is allowed to use (75% of the system's cores) (Default: 0)
 - **confidence_threshold**: Minimum Whisper language probability (0.0-1.0) for a single audio sample to be accepted immediately. Below it, the evidence of several samples spread over the runtime is pooled, and if that is still not convincing the entire audio track is analyzed. Tracks with no confident result are left as `und` and flagged *Inconclusive*. Higher values are more conservative but reduce false positives. (Default: 0.9)
@@ -293,18 +311,18 @@ Here you can edit settings and check your log.
 ***
 
 <a id="webhook-on-remux"></a>
-## 🔔 Webhook on Remux
+## 🔔 Webhook
 
-ULDAS can send an HTTP request after each remux. (e.g. for triggering Autoscan/Autopulse/..)
-Enable it in the WebUI under **Settings → Advanced → Webhook**, or in `config.yml`.
+ULDAS can send an HTTP request after each file it changes, whether it was remuxed or had its language tags / subtitle flags edited in place (e.g. for triggering Autoscan/Autopulse/..). This lets Plex, Jellyfin or Emby pick up the new track languages without a full library scan.
+Enable it in the WebUI on the **Webhook** tab, or in `config.yml`.
 
 | Variable | Value |
 | --- | --- |
-| `{path}` / `{path_enc}` | Full path of the remuxed `.mkv` (raw / URL-encoded) |
+| `{path}` / `{path_enc}` | Full path of the changed file (raw / URL-encoded) |
 | `{dir}` / `{dir_enc}` | Parent folder of the file |
 | `{filename}` | File name with extension |
 | `{name_noext}` | File name without extension |
-| `{old_path}` / `{old_path_enc}` | Original pre-remux file path |
+| `{old_path}` / `{old_path_enc}` | Original pre-remux file path (same as `{path}` for in-place edits) |
 
 > Use the `_enc` variants whenever the value goes into a URL query string or a form body, since media paths contain spaces and special characters.
 
@@ -316,7 +334,8 @@ Enable it in the WebUI under **Settings → Advanced → Webhook**, or in `confi
 | `webhook_timeout_seconds` | Request timeout (default `10`). The call is fire-and-forget — it never blocks or fails a run |
 | `webhook_path_from` / `webhook_path_to` | Optional path remap, for when ULDAS's container mounts differ from your media server's. The leading `from` path is replaced with `to` before the `{path}` variables are built |
 
-The webhook only fires on an actual remux (the rename event), never on in-place language-tag edits, and is skipped entirely during `dry_run`.
+The webhook fires after every remux and every in-place edit (audio language, subtitle language or flags, and *Change audio language tag* runs). Files with nothing to change don't trigger it, and it is skipped entirely during `dry_run`.
+Identical requests are only sent once per run, so a URL built from `{dir}` / `{dir_enc}` triggers one scan per folder instead of one per file.
 
 ***
 
@@ -398,7 +417,7 @@ External subtitle File Formats:
 
 | Flag | Description |
 | --- | --- |
-| `--device {auto,cpu,cuda}` | Device for Whisper inference |
+| `--device {auto,cpu,cuda,openvino}` | Device for Whisper inference (`openvino` = Intel GPU, `:intel` image) |
 | `--compute-type {auto,int8,int8_float16,int16,float16,float32}` | Compute type for Whisper inference |
 | `--cpu-threads N` | Number of CPU threads (`0` = auto) |
 
